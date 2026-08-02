@@ -27,7 +27,7 @@ jobs:
             config_path: models/ornith-1.0-35b/config.yaml
             dockerfile_template: Dockerfile.ik-llama.in
             hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
-            hf_filename: Ornith-1.0-35B-Q4_K_M.gguf
+            hf_filename: ornith-1.0-35b-Q4_K_M.gguf
             download_mode: single
             shard: 'true'
             image_name: ik-llama-ornith
