@@ -1,15 +1,25 @@
-# Exclude everything not needed by the Docker build context.
-# The shards (Ornith-1.0-35B-Q4_K_M-*.gguf, Qwen3.5-0.8B.Q4_K_M-*.gguf)
-# are placed in the working directory by CI before docker build runs,
-# so we keep them via the explicit !include patterns below.
-*
-!*.gguf
-!Dockerfile
-!Dockerfile.in
-!models/
-!models/**
+# Build infrastructure (not needed in any image)
+.git/
+.github/
+.gitignore
+.dockerignore
+LICENSE
+README.md
+Dockerfile.ik-llama.in
+Dockerfile.vllm.in
 
-# Explicit shard patterns (defensive; CI generates Dockerfile referencing
-# these exact basenames).
+# llama.cpp clone (built in CI for ik_llama sharding, then deleted)
+llama.cpp/
+
+# Default-exclude model files; the !-prefixed lines below re-include
+# the specific ones each image needs.
+*.gguf
+qwen3.5-9b-snapshot
+qwen3.5-9b-snapshot/**
+
+# Re-include sharded Ornith GGUF (ik_llama image)
 !Ornith-1.0-35B-Q4_K_M-*.gguf
-!Qwen3.5-0.8B.Q4_K_M-*.gguf
+
+# Re-include the vLLM model snapshot directory + contents
+!qwen3.5-9b-snapshot
+!qwen3.5-9b-snapshot/**

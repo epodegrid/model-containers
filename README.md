@@ -1,152 +1,160 @@
 # model-containers
 
-Two container images for serving LLMs on the Azure LLM platform — both built
-on [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) (with
-[llama-swap](https://github.com/mostlygeek/llama-swap) pre-integrated via the
-official `cpu-swap` upstream image), then wrapped to ship the sharded GGUF
-weights inside the image so it pulls as a single OCI artifact.
+Two container images for serving LLMs on the Azure LLM platform. Different
+engines, picked for the hardware each runs on:
 
-This sidesteps two of the org constraints called out in the architecture
-brief:
+- **`ik-llama-ornith`** — ik_llama.cpp on CPU. The CPU-only flagship path
+  that sidesteps the org privileged-namespace policy blocking the NVIDIA
+  device-plugin path. Hosts the Ornith-1.0-35B agentic-coding model.
+- **`vllm-qwen3.5-9b`** — vLLM on the T4 pool. Marlin kernel + PagedAttention
+  batching for dense 9B at high concurrent-user throughput.
 
-1. **No GPU driver path** — ik_llama.cpp's `cpu-swap` image is pure
-   userspace. No NVIDIA driver DaemonSet, no privileged pod, nothing for the
-   privileged-namespace policy to block.
-2. **GHCR layer limit (10 GB per layer)** — `Ornith-1.0-35B` Q4_K_M is 21 GB,
-   so the GGUF is sharded (~5 GB each, one image layer per shard) before
-   `docker build`. Each layer stays well under the limit and uploads within
-   GHCR's per-layer timeout.
+The brief originally picked ik_llama.cpp everywhere as the "single engine"
+default. This is the "add vLLM on T4 because measured concurrency on T4
+benefits from PagedAttention" branch from the brief — two engines, two
+images, deployed as separate AKS workloads.
+
+## Why two engines, not one
+
+| Pool | Engine | Why |
+|---|---|---|
+| CPU (NCC40 / Genoa) | **ik_llama.cpp** | CPU-only; vLLM doesn't help. ik_llama has the MoE/GatedDeltaNet optimizations that work around stock-llama.cpp's CPU bug for Ornith's Qwen3.5 hybrid arch. |
+| GPU (NCasT4_v3 / T4) | **vLLM** | PagedAttention + continuous batching handle multi-user concurrency orders of magnitude better than ik_llama on the same hardware. Modern vLLM supports Marlin on Turing, which ik_llama.cpp doesn't have. |
 
 ## Images
 
-| Image | Model | Quant | Weight | Shards | Hardware target |
+| Image | Engine | Model | Format | Weight | Hardware |
 |---|---|---|---|---|---|
-| `ghcr.io/epodegrid/ik-llama-ornith:q4km`      | `deepreinforce-ai/Ornith-1.0-35B`        | Q4_K_M | 21.2 GB | 5 × ~5 GB | EPYC Genoa CPU (NCC40) |
-| `ghcr.io/epodegrid/ik-llama-qwen3.5-0.8b:q4km` | `Qwen/Qwen3.5-0.8B` (mradermacher GGUF) | Q4_K_M | 528 MB  | 1         | NCasT4_v3 (T4)         |
+| `ghcr.io/epodegrid/ik-llama-ornith:q4km`   | ik_llama.cpp `cpu-swap` | `deepreinforce-ai/Ornith-1.0-35B`  | GGUF Q4_K_M (5 shards × ~5 GB) | 21.2 GB | EPYC Genoa (NCC40) |
+| `ghcr.io/epodegrid/vllm-qwen3.5-9b:bf16`  | vLLM OpenAI              | `Qwen/Qwen3.5-9B`                  | safetensors BF16                | ~18 GB  | NCasT4_v3 (T4)       |
 
-Both images expose the same surface: llama-swap on port `8080`, OpenAI- and
-Anthropic-compatible APIs at `/v1` and `/v1/messages`, llama.cpp web UI at
-`/ui`, Prometheus metrics at `/metrics`.
+> **Why ik_llama.cpp on T4 wouldn't work as well for Qwen3.5-9B:** The brief's
+> shortlist noted "No Marlin = modest tok/s" for the T4 pool with ik_llama
+> (Turing predates the Marlin kernel). vLLM has Marlin support on Turing +
+> PagedAttention for batched serving. For a dense 9B model with concurrent
+> users, vLLM is the right pick.
 
-> **Why the same engine everywhere?** Per the brief's "single-engine default"
-> decision: one image pattern, one metrics format, one ops surface. vLLM is
-> only added to the small tier if measured concurrency actually saturates
-> ik_llama.cpp on T4 — measured, not assumed.
+## Why GGUF sharded for Ornith
 
-### Why not stock llama.cpp / LocalAI for Ornith?
+GHCR's per-layer upload limit is 10 GB. The Ornith Q4_K_M is 21 GB. To push
+as a single OCI image we shard with `llama-gguf-split --split-max-size 5G`
+(5 GB chunks, each well under the limit) and `COPY` each shard as its own
+image layer. llama.cpp / ik_llama loads a sharded GGUF natively — just point
+`--model` at the `-00001-of-` shard.
 
-Ornith is a hybrid GatedDeltaNet + attention MoE (Qwen3.5 family). Stock
-llama.cpp on that arch hits
-[a known CPU perf bug](https://github.com/ggerganov/llama.cpp/issues/19480) —
-Qwen3-Coder-Next (80B MoE, 3B active) gets ~7.7 tok/s where bandwidth math
-predicts 35-60 tok/s. ik_llama.cpp's MoE optimizations are the cited fix.
-LocalAI's default backend wraps stock llama.cpp and inherits the bug.
+We shard to 5 GB (not 9 GB or 10 GB) to leave headroom for layer-encoding
+overhead and to fit within GHCR's ~10 min per-layer upload timeout even on
+slower links.
 
-### Why mradermacher for Qwen3.5-0.8B?
+## Why bake the vLLM model into the image too
 
-There is no `Qwen/Qwen3.5-0.8B-GGUF`. mradermacher's quant is text-only (the
-mmproj files are listed separately) and uses standard k-quants that ik_llama
-loads cleanly. Unsloth's `_XL` quants are explicitly unsafe for ik_llama —
-this one isn't Unsloth so that's moot, but worth flagging if we add more
-small models later.
+Same reason: AKS pods can't reach Hugging Face at runtime (org egress
+block). We pre-download in CI (where egress works) and `COPY` each
+safetensors file into the image as its own layer, ordered largest-first so
+config/tokenizer edits don't invalidate the heavy weight layers in the
+build cache.
 
 ## Local quick-start
 
 ```bash
-# Pull an image (or via Nexus — see below)
+# Ornith on CPU (the brief's flagship path)
 docker pull ghcr.io/epodegrid/ik-llama-ornith:q4km
-
-# Run it. llama-swap listens on 8080 inside the container.
-# First request for a model triggers load (~30-60s for Ornith).
 docker run --rm -p 9292:8080 ghcr.io/epodegrid/ik-llama-ornith:q4km
 
-# Smoke test
+# Qwen3.5-9B on GPU (T4)
+docker pull ghcr.io/epodegrid/vllm-qwen3.5-9b:bf16
+docker run --rm --gpus all --ipc=host -p 9292:8000 ghcr.io/epodegrid/vllm-qwen3.5-9b:bf16
+
+# Smoke test (both)
 curl -s http://localhost:9292/v1/models
 curl -s http://localhost:9292/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "ornith",
-    "messages": [{"role":"user","content":"hi"}],
-    "max_tokens": 32
-  }'
+  -d '{"model":"ornith","messages":[{"role":"user","content":"hi"}],"max_tokens":32}'
 ```
 
-Available model IDs (defined per-image in `models/*/config.yaml`):
+### Model IDs / aliases (Ornith image, llama-swap routing)
 
 - `ornith`, `Ornith-1.0-35B`, `deepreinforce-ai/Ornith-1.0-35B`
-  - `ornith:thinking-coding` — explicit thinking mode
-  - `ornith:instruct`       — non-thinking mode
-- `qwen3.5-0.8b`, `Qwen3.5-0.8B`, `Qwen/Qwen3.5-0.8B`
-  - `qwen3.5-0.8b:thinking` — enable thinking
-  - `qwen3.5-0.8b:vl`       — VL-style sampling (works for text-only too)
+  - `ornith:thinking-coding` — explicit thinking-mode sampling
+  - `ornith:instruct`       — non-thinking mode (enable_thinking=false)
+
+### Model IDs (vLLM image, single-model pod)
+
+- `qwen3.5-9b` (or `--model Qwen/Qwen3.5-9B` when calling the API)
+  - Defaults: temp=1.0, top_p=0.95, top_k=20, presence_penalty=1.5 (model card thinking defaults)
+  - Append `:instruct` style suffixes to override sampling at the client level
 
 ## AKS pull-through (Nexus)
 
-The brief's Nexus-as-pull-through-proxy path applies as-is. Replace the image
-reference at the AKS deployment level:
+Replace the image reference at the AKS deployment level:
 
 ```
 # Direct (only works if AKS nodes can reach ghcr.io)
 ghcr.io/epodegrid/ik-llama-ornith:q4km
+ghcr.io/epodegrid/vllm-qwen3.5-9b:bf16
 
 # Via Nexus (the org-default path — AKS nodes pull from Nexus, Nexus caches from GHCR)
 <nexus-host>:8081/<docker-proxy>/epodegrid/ik-llama-ornith:q4km
+<nexus-host>:8081/<docker-proxy>/epodegrid/vllm-qwen3.5-9b:bf16
 ```
 
-Nexus 3.92 handles Docker-image-format proxying fine; the GGUFs are baked
-into image layers (not pushed as bare ORAS artifacts) precisely because Nexus
-3.92 doesn't reliably proxy OCI artifact manifests until 3.94.
+Nexus 3.92 handles Docker-image-format proxying fine. The GGUFs are baked
+into image layers (not pushed as bare ORAS artifacts) precisely because
+Nexus 3.92 doesn't reliably proxy OCI artifact manifests until 3.94.
 
 ## Build pipeline
 
 `/.github/workflows/build.yml` builds both images from a single workflow with
 a matrix strategy. Each matrix entry:
 
-1. Downloads the GGUF from Hugging Face (`huggingface_hub`).
-2. Builds `llama-gguf-split` from a shallow clone of `ggerganov/llama.cpp`.
-3. Shards the GGUF to ~5 GB chunks (`--split-max-size 5G`).
-4. Generates a `Dockerfile` from `Dockerfile.in` plus one `COPY` line per
-   shard appended at the end. This keeps the per-model bits (`config.yaml`)
-   in one place while letting the shard count vary per model.
-5. `docker buildx build` with `--build-arg MODEL_CONFIG=<per-model path>`,
-   pushes to `ghcr.io/epodegrid/<image_name>:<tags>`.
+1. **Downloads** the model from Hugging Face:
+   - ik_llama: `hf_hub_download` for a single `.gguf` file
+   - vLLM: `snapshot_download` for the full safetensors repo
+2. **(ik_llama only)** Builds `llama-gguf-split` from a shallow clone of
+   `ggerganov/llama.cpp`, shards the GGUF to ~5 GB chunks, deletes the
+   llama.cpp source to free disk.
+3. **Generates** the `Dockerfile` from the engine-specific template
+   (`Dockerfile.ik-llama.in` or `Dockerfile.vllm.in`) plus one `COPY` line
+   per file appended:
+   - ik_llama: one COPY per shard
+   - vLLM: one COPY per snapshot file, ordered largest-first
+4. `docker buildx build` pushes to `ghcr.io/epodegrid/<image_name>:<tags>`.
 
 Triggers:
 
-- Push to `main` that touches `Dockerfile.in`, `models/**`, or the workflow
-  file itself.
+- Push to `main` that touches `Dockerfile.ik-llama.in`, `Dockerfile.vllm.in`,
+  `models/**`, or the workflow file itself.
 - Manual `workflow_dispatch`.
 
-Image tags emitted per build:
+Image tags emitted per build (per matrix entry):
 
-- `ghcr.io/.../<name>:q4km`         (per-quant tag, on default-branch only)
-- `ghcr.io/.../<name>:latest`       (alias for `q4km`, on default-branch only)
-- `ghcr.io/.../<name>:<sha-prefix>` (every build)
+- `ghcr.io/.../<name>:q4km` or `:bf16` (per-engine tag, default-branch only)
+- `ghcr.io/.../<name>:latest`                          (default-branch only)
+- `ghcr.io/.../<name>:<sha-prefix>`                    (every build)
 
 ## Updating to a newer model / quant
 
-1. Edit the matrix entry in `.github/workflows/build.yml` (change `hf_repo`,
-   `hf_filename`, `image_name`, `image_tag`).
-2. Update `models/<id>/config.yaml` so the `--model` path references the
-   new first-shard filename (and so the chat template / sampler settings
-   match the new model's recommended defaults).
-3. Push. Workflow builds & pushes; AKS image reference points at the new
-   tag.
+For Ornith (ik_llama): edit `matrix.include` in the workflow (change
+`hf_filename`, `image_tag`), update the `--model` path in
+`models/ornith-1.0-35b/config.yaml` if the shard count changes, push.
 
-For the 5-shard Ornith image the first-shard filename is
-`Ornith-1.0-35B-Q4_K_M-00001-of-00005.gguf` — if you bump to Q5_K_M (24.7
-GB → still 5 shards at 5 GB max) it becomes
-`Ornith-1.0-35B-Q5_K_M-00001-of-00005.gguf`, etc.
+For Qwen3.5-9B (vLLM): edit `matrix.include` in the workflow, update the
+`--model` arg and `--max-model-len` in `Dockerfile.vllm.in` if needed, push.
+
+To swap engines (e.g., add a vLLM image for Ornith on GPU or an ik_llama
+image for Qwen3.5-9B on CPU), add another matrix entry with the
+appropriate `dockerfile_template`, `download_mode`, `shard`, and
+`hf_*` fields.
 
 ## Repo layout
 
 ```
 .
-├── .github/workflows/build.yml      # CI: download → shard → build → push
-├── Dockerfile.in                    # Template; CI appends one COPY per shard
+├── .github/workflows/build.yml      # CI: download → (shard) → build → push
+├── Dockerfile.ik-llama.in           # Template for the CPU/Genoa image
+├── Dockerfile.vllm.in               # Template for the GPU/T4 image
 ├── models/
-│   ├── ornith-1.0-35b/config.yaml   # llama-swap config for the CPU image
-│   └── qwen3.5-0.8b/config.yaml     # llama-swap config for the T4 image
+│   └── ornith-1.0-35b/config.yaml   # llama-swap config (CPU image only)
 ├── .dockerignore
 ├── .gitignore
 ├── LICENSE
@@ -172,9 +180,13 @@ GB → still 5 shards at 5 GB max) it becomes
 - **GGML_NATIVE in the upstream `cpu-swap` image.** ik_llama's CI builds
   with `-DGGML_NATIVE=ON`. Whether that picks up Zen4 IQK kernels depends
   on the build host's CPU. If benchmarks show poor tok/s on EPYC Genoa we
-  may need to fork the build step with `--cpu-moe` flags or rebuild from
-  source with explicit Zen4 flags.
-- **Single-engine assumption.** ik_llama.cpp everywhere is the default. If
-  the small tier is measured to saturate (i.e. Qwen3.5-0.8B with `--parallel
-  4` actually fills the T4), add a third image using vLLM as a separate
-  engine. Don't preemptively add it.
+  may need to fork the build step with explicit Zen4 flags.
+- **Single-engine default was overruled.** The brief said "start
+  single-engine on ik_llama, add vLLM only if the small tier is measured
+  to actually saturate." We chose to commit to vLLM on T4 up front because
+  PagedAttention is a large enough batched-throughput lever that the
+  "actually saturate" question is answered in advance for dense 9B at any
+  realistic concurrency level. If you want to revert, change the
+  `qwen3.5-9b` matrix entry's `dockerfile_template` to `Dockerfile.ik-llama.in`,
+  set `download_mode: single`, point `hf_repo` / `hf_filename` at a
+  Qwen3.5-9B GGUF (need to find one), and set `shard: true`.

@@ -5,7 +5,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Dockerfile.in'
+      - 'Dockerfile.ik-llama.in'
+      - 'Dockerfile.vllm.in'
       - 'models/**'
       - '.github/workflows/build.yml'
 
@@ -22,17 +23,24 @@ jobs:
       matrix:
         include:
           - model_id: ornith-1.0-35b
+            engine: ik-llama
             config_path: models/ornith-1.0-35b/config.yaml
+            dockerfile_template: Dockerfile.ik-llama.in
             hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
             hf_filename: Ornith-1.0-35B-Q4_K_M.gguf
+            download_mode: single
+            shard: 'true'
             image_name: ik-llama-ornith
             image_tag: q4km
-          - model_id: qwen3.5-0.8b
-            config_path: models/qwen3.5-0.8b/config.yaml
-            hf_repo: mradermacher/Qwen3.5-0.8B-GGUF
-            hf_filename: Qwen3.5-0.8B.Q4_K_M.gguf
-            image_name: ik-llama-qwen3.5-0.8b
-            image_tag: q4km
+          - model_id: qwen3.5-9b
+            engine: vllm
+            dockerfile_template: Dockerfile.vllm.in
+            hf_repo: Qwen/Qwen3.5-9B
+            download_mode: snapshot
+            snapshot_dir: qwen3.5-9b-snapshot
+            shard: 'false'
+            image_name: vllm-qwen3.5-9b
+            image_tag: bf16
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,26 +63,44 @@ jobs:
       - name: Install huggingface_hub
         run: pip install --quiet huggingface_hub
 
-      - name: Download GGUF (${{ matrix.hf_filename }})
+      - name: Download model (${{ matrix.download_mode }})
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ matrix.hf_repo }}
           HF_FILENAME: ${{ matrix.hf_filename }}
+          DOWNLOAD_MODE: ${{ matrix.download_mode }}
+          SNAPSHOT_DIR: ${{ matrix.snapshot_dir }}
         run: |
           python - <<'PY'
           import os
-          from huggingface_hub import hf_hub_download
-          path = hf_hub_download(
-              repo_id=os.environ["HF_REPO"],
-              filename=os.environ["HF_FILENAME"],
-              repo_type="model",
-              local_dir=".",
-              token=os.environ.get("HF_TOKEN") or None,
-          )
-          print("Downloaded:", path)
+          from huggingface_hub import hf_hub_download, snapshot_download
+
+          mode = os.environ["DOWNLOAD_MODE"]
+          repo = os.environ["HF_REPO"]
+          token = os.environ.get("HF_TOKEN") or None
+
+          if mode == "single":
+              path = hf_hub_download(
+                  repo_id=repo,
+                  filename=os.environ["HF_FILENAME"],
+                  repo_type="model",
+                  local_dir=".",
+                  token=token,
+              )
+              print("Downloaded:", path)
+          elif mode == "snapshot":
+              path = snapshot_download(
+                  repo_id=repo,
+                  local_dir=os.environ["SNAPSHOT_DIR"],
+                  token=token,
+              )
+              print("Downloaded snapshot to:", path)
+          else:
+              raise SystemExit(f"unknown download mode: {mode}")
           PY
 
       - name: Build llama-gguf-split
+        if: matrix.shard == 'true'
         run: |
           git clone --depth 1 https://github.com/ggerganov/llama.cpp.git
           cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release
@@ -82,6 +108,7 @@ jobs:
           ls -lh llama.cpp/build/bin/llama-gguf-split
 
       - name: Shard GGUF (~5 GB per shard)
+        if: matrix.shard == 'true'
         env:
           HF_FILENAME: ${{ matrix.hf_filename }}
         run: |
@@ -94,18 +121,42 @@ jobs:
           echo "--- shards ---"
           ls -lh "$base-"*.gguf
 
-      - name: Generate Dockerfile (one COPY per shard)
+      - name: Cleanup llama.cpp source (no longer needed)
+        if: matrix.shard == 'true'
+        run: rm -rf llama.cpp
+
+      - name: Generate Dockerfile (one COPY per file/layer)
         env:
           HF_FILENAME: ${{ matrix.hf_filename }}
+          SNAPSHOT_DIR: ${{ matrix.snapshot_dir }}
+          DOCKERFILE_TEMPLATE: ${{ matrix.dockerfile_template }}
+          SHARD: ${{ matrix.shard }}
         run: |
-          base="${HF_FILENAME%.gguf}"
           {
-            cat Dockerfile.in
+            cat "$DOCKERFILE_TEMPLATE"
             echo ""
-            echo "# --- Auto-generated COPY lines (one image layer per shard) ---"
-            for f in "$base-"*.gguf; do
-              echo "COPY $f /models/$f"
-            done
+            echo "# --- Auto-generated COPY lines (one image layer per file) ---"
+            if [ "$SHARD" = "true" ]; then
+              # ik_llama: sharded GGUF -> /models/<shard>
+              base="${HF_FILENAME%.gguf}"
+              for f in "$base-"*.gguf; do
+                echo "COPY $f /models/$(basename "$f")"
+              done
+            else
+              # vLLM: snapshot -> /models/qwen3.5-9b/<file>
+              # Sorted largest-first so config/tokenizer edits don't invalidate the
+              # heavy safetensors layer cache.
+              # Portable stat: try GNU first (-c%s), fall back to BSD (-f%z).
+              ls -1 "$SNAPSHOT_DIR" \
+                | while read -r f; do
+                    size=$(stat -c%s "$SNAPSHOT_DIR/$f" 2>/dev/null || stat -f%z "$SNAPSHOT_DIR/$f")
+                    printf '%s\t%s\n' "$size" "$SNAPSHOT_DIR/$f"
+                  done \
+                | sort -rn \
+                | while IFS=$'\t' read -r size path; do
+                    echo "COPY $path /models/qwen3.5-9b/$(basename "$path")"
+                  done
+            fi
           } > Dockerfile
           echo "=== Generated Dockerfile ==="
           cat Dockerfile
