@@ -1,0 +1,23 @@
+# Build artifacts
+Dockerfile
+*.gguf
+*.tar
+*.tar.gz
+
+# llama.cpp source clone (built in CI)
+llama.cpp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.local

@@ -1,0 +1,143 @@
+name: build-images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.in'
+      - 'models/**'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: ${{ matrix.image_name }}:${{ matrix.image_tag }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model_id: ornith-1.0-35b
+            config_path: models/ornith-1.0-35b/config.yaml
+            hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
+            hf_filename: Ornith-1.0-35B-Q4_K_M.gguf
+            image_name: ik-llama-ornith
+            image_tag: q4km
+          - model_id: qwen3.5-0.8b
+            config_path: models/qwen3.5-0.8b/config.yaml
+            hf_repo: mradermacher/Qwen3.5-0.8B-GGUF
+            hf_filename: Qwen3.5-0.8B.Q4_K_M.gguf
+            image_name: ik-llama-qwen3.5-0.8b
+            image_tag: q4km
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "Before:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/lib/android 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          docker image prune --all --force 2>/dev/null || true
+          echo "After:"
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install huggingface_hub
+        run: pip install --quiet huggingface_hub
+
+      - name: Download GGUF (${{ matrix.hf_filename }})
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ matrix.hf_repo }}
+          HF_FILENAME: ${{ matrix.hf_filename }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          path = hf_hub_download(
+              repo_id=os.environ["HF_REPO"],
+              filename=os.environ["HF_FILENAME"],
+              repo_type="model",
+              local_dir=".",
+              token=os.environ.get("HF_TOKEN") or None,
+          )
+          print("Downloaded:", path)
+          PY
+
+      - name: Build llama-gguf-split
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git
+          cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build llama.cpp/build --target llama-gguf-split -j"$(nproc)"
+          ls -lh llama.cpp/build/bin/llama-gguf-split
+
+      - name: Shard GGUF (~5 GB per shard)
+        env:
+          HF_FILENAME: ${{ matrix.hf_filename }}
+        run: |
+          base="${HF_FILENAME%.gguf}"
+          ./llama.cpp/build/bin/llama-gguf-split \
+            --split-max-size 5G \
+            "$HF_FILENAME" \
+            "$base"
+          rm "$HF_FILENAME"
+          echo "--- shards ---"
+          ls -lh "$base-"*.gguf
+
+      - name: Generate Dockerfile (one COPY per shard)
+        env:
+          HF_FILENAME: ${{ matrix.hf_filename }}
+        run: |
+          base="${HF_FILENAME%.gguf}"
+          {
+            cat Dockerfile.in
+            echo ""
+            echo "# --- Auto-generated COPY lines (one image layer per shard) ---"
+            for f in "$base-"*.gguf; do
+              echo "COPY $f /models/$f"
+            done
+          } > Dockerfile
+          echo "=== Generated Dockerfile ==="
+          cat Dockerfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}
+          tags: |
+            type=sha,format=short,prefix=
+            type=raw,value=${{ matrix.image_tag }},enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MODEL_CONFIG=${{ matrix.config_path }}
+          provenance: false
