@@ -34,13 +34,24 @@ RUN git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git /src
 
 WORKDIR /src
 
-# Explicit Zen N target. Drops GGML_AVX512_VNNI / _BF16 / _VBMI because
-# those aren't on Zen 4, and forcing them via -mavx512{b,v}mi would
-# generate illegal instructions at runtime on Zen 4 hardware.
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+# Explicit Zen N target.
+#
+# GCC 13 (Ubuntu 24.04 default) doesn't know `-march=znver5` — that
+# value was added in GCC 14. For ARCH=5 we emulate Zen 5 with `znver4`
+# + the Zen 5-only AVX-512 extensions. The instruction set produced
+# is the same one GCC 14's `-march=znver5` emits. On real Zen 5
+# hardware this binary will run correctly; on Zen 4 hardware it
+# would crash (illegal VNNI/BF16/VBMI/VBMI2). When we move to a base
+# image with GCC 14+, switch this back to `-march=znver${ARCH}`.
+RUN if [ "$ARCH" = "5" ]; then \
+        MARCH_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2"; \
+    else \
+        MARCH_FLAGS="-march=znver4"; \
+    fi && \
+    cmake -B build -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
-        -DCMAKE_C_FLAGS="-march=znver${ARCH}" \
-        -DCMAKE_CXX_FLAGS="-march=znver${ARCH}" \
+        -DCMAKE_C_FLAGS="$MARCH_FLAGS" \
+        -DCMAKE_CXX_FLAGS="$MARCH_FLAGS" \
         -DGGML_OPENMP=ON \
         -DGGML_IQK_FA_ALL_QUANTS=ON
 

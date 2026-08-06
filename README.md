@@ -224,7 +224,14 @@ To swap engines, add another matrix entry with the appropriate
   gated on `__AVX512VNNI__`) is **NOT** defined on the `zen4` build —
   we get the AVX-512 base path, not the IQK VNNI kernels. Zen 4 uses
   256-bit double-pumped AVX-512 (~30-50% faster than AVX2). The `zen5`
-  build gets the full IQK VNNI kernels because znver5 has VNNI.
+  build gets the full IQK VNNI kernels (znver5 has VNNI).
+- **`zen5` build emulates znver5 with GCC 13.** GCC 13 (Ubuntu 24.04
+  default) doesn't know `-march=znver5` — that value was added in
+  GCC 14. We emulate Zen 5 with `-march=znver4 -mavx512vnni
+  -mavx512bf16 -mavx512vbmi -mavx512vbmi2`, which produces the same
+  instruction set on real Zen 5 hardware. When we move to a base image
+  with GCC 14+ (or Clang 18+), switch the `if/else` back to a single
+  `-march=znver${ARCH}`.
 - **Go-4 loads both text + vision encoders at startup.** That's ~500 MB
   of weights + ~500 MB of PyTorch CPU. The cold-start time on a 24-core
   Genoa node should be ~10-15 s. If we add image batching later, switch
