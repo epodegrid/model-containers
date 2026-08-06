@@ -22,7 +22,10 @@ FROM ubuntu:24.04 AS ik-llama-builder
 ARG DEBIAN_FRONTEND=noninteractive
 ARG ARCH=4
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+        || (echo "apt-get update failed, retrying in 30s..." && sleep 30 && apt-get update) \
+        || (echo "apt-get update failed again, retrying in 60s..." && sleep 60 && apt-get update) \
+    && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
         git \
