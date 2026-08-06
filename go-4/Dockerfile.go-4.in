@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+
+# go-4: multimodal embedding service for nomic-embed-vision-v1.5 + nomic-embed-text-v1.5.
+# ik_llama.cpp can't do this — its vision support is for multimodal CHAT
+# (vision feeds into an LLM decoder), not standalone image-embedding
+# servers. So we wrap the HuggingFace transformers model directly in a
+# small FastAPI service.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# OS-level deps for Pillow (libjpeg/zlib/etc.) and the build chain.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        libjpeg-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps. PyTorch CPU wheels from the official index so we don't
+# pull the (huge) CUDA-enabled default.
+COPY go-4/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Service code.
+COPY go-4/service.py /app/service.py
+
+# Pre-baked model snapshots — CI downloads both repos from Hugging Face
+# to these exact paths before docker build runs (so the build context
+# includes them). Each snapshot is one COPY, one layer, well under the
+# GHCR 10 GB per-layer limit (~440 MB text, ~370 MB vision).
+COPY go-4-snapshot-text/    /models/nomic-embed-text-v1.5/
+COPY go-4-snapshot-vision/  /models/nomic-embed-vision-v1.5/
+
+ENV TEXT_MODEL_PATH=/models/nomic-embed-text-v1.5
+ENV VISION_MODEL_PATH=/models/nomic-embed-vision-v1.5
+
+EXPOSE 8000
+
+CMD ["python", "service.py"]

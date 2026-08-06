@@ -6,7 +6,7 @@ on:
     branches: [main]
     paths:
       - 'Dockerfile.ik-llama.in'
-      - 'Dockerfile.vllm.in'
+      - 'go-4/**'
       - 'models/**'
       - '.github/workflows/build.yml'
 
@@ -22,25 +22,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - model_id: ornith-1.0-35b
-            engine: ik-llama
-            config_path: models/ornith-1.0-35b/config.yaml
+          - image_name: eve
             dockerfile_template: Dockerfile.ik-llama.in
+            config_path: models/ornith-1.0-35b/config.yaml
+            download_mode: single
             hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
             hf_filename: ornith-1.0-35b-Q4_K_M.gguf
-            download_mode: single
             shard: 'true'
-            image_name: ik-llama-ornith
             image_tag: q4km
-          - model_id: qwen3.5-9b
-            engine: vllm
-            dockerfile_template: Dockerfile.vllm.in
-            hf_repo: Qwen/Qwen3.5-9B
+          - image_name: wall-e
+            dockerfile_template: Dockerfile.ik-llama.in
+            config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
+            download_mode: single
+            hf_repo: google/gemma-4-12b-it-qat-q4_0-gguf
+            hf_filename: gemma-4-12b-it-qat-q4_0.gguf
+            shard: 'true'
+            image_tag: q4_0
+          - image_name: go-4
+            dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
-            snapshot_dir: qwen3.5-9b-snapshot
+            hf_repos: |
+              nomic-ai/nomic-embed-text-v1.5
+              nomic-ai/nomic-embed-vision-v1.5
+            hf_snapshot_dirs: |
+              go-4-snapshot-text
+              go-4-snapshot-vision
             shard: 'false'
-            image_name: vllm-qwen3.5-9b
-            image_tag: bf16
+            image_tag: latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,19 +77,19 @@ jobs:
           HF_REPO: ${{ matrix.hf_repo }}
           HF_FILENAME: ${{ matrix.hf_filename }}
           DOWNLOAD_MODE: ${{ matrix.download_mode }}
-          SNAPSHOT_DIR: ${{ matrix.snapshot_dir }}
+          HF_REPOS: ${{ matrix.hf_repos }}
+          HF_SNAPSHOT_DIRS: ${{ matrix.hf_snapshot_dirs }}
         run: |
           python - <<'PY'
           import os
           from huggingface_hub import hf_hub_download, snapshot_download
 
           mode = os.environ["DOWNLOAD_MODE"]
-          repo = os.environ["HF_REPO"]
           token = os.environ.get("HF_TOKEN") or None
 
           if mode == "single":
               path = hf_hub_download(
-                  repo_id=repo,
+                  repo_id=os.environ["HF_REPO"],
                   filename=os.environ["HF_FILENAME"],
                   repo_type="model",
                   local_dir=".",
@@ -89,12 +97,13 @@ jobs:
               )
               print("Downloaded:", path)
           elif mode == "snapshot":
-              path = snapshot_download(
-                  repo_id=repo,
-                  local_dir=os.environ["SNAPSHOT_DIR"],
-                  token=token,
-              )
-              print("Downloaded snapshot to:", path)
+              repos = [r.strip() for r in os.environ.get("HF_REPOS", "").splitlines() if r.strip()]
+              dirs  = [d.strip() for d in os.environ.get("HF_SNAPSHOT_DIRS", "").splitlines() if d.strip()]
+              if len(repos) != len(dirs):
+                  raise SystemExit(f"HF_REPOS and HF_SNAPSHOT_DIRS length mismatch: {len(repos)} vs {len(dirs)}")
+              for repo, dest in zip(repos, dirs):
+                  path = snapshot_download(repo_id=repo, local_dir=dest, token=token)
+                  print(f"Downloaded {repo} to:", path)
           else:
               raise SystemExit(f"unknown download mode: {mode}")
           PY
@@ -121,44 +130,35 @@ jobs:
           echo "--- shards ---"
           ls -lh "$base-"*.gguf
 
-      - name: Cleanup llama.cpp source (no longer needed)
+      - name: Cleanup llama.cpp source
         if: matrix.shard == 'true'
         run: rm -rf llama.cpp
 
-      - name: Generate Dockerfile (one COPY per file/layer)
+      - name: Generate Dockerfile (append COPYs for ik_llama sharded entries)
+        if: matrix.shard == 'true'
         env:
           HF_FILENAME: ${{ matrix.hf_filename }}
-          SNAPSHOT_DIR: ${{ matrix.snapshot_dir }}
           DOCKERFILE_TEMPLATE: ${{ matrix.dockerfile_template }}
-          SHARD: ${{ matrix.shard }}
         run: |
+          base="${HF_FILENAME%.gguf}"
           {
             cat "$DOCKERFILE_TEMPLATE"
             echo ""
-            echo "# --- Auto-generated COPY lines (one image layer per file) ---"
-            if [ "$SHARD" = "true" ]; then
-              # ik_llama: sharded GGUF -> /models/<shard>
-              base="${HF_FILENAME%.gguf}"
-              for f in "$base-"*.gguf; do
-                echo "COPY $f /models/$(basename "$f")"
-              done
-            else
-              # vLLM: snapshot -> /models/qwen3.5-9b/<file>
-              # Sorted largest-first so config/tokenizer edits don't invalidate the
-              # heavy safetensors layer cache.
-              # Portable stat: try GNU first (-c%s), fall back to BSD (-f%z).
-              ls -1 "$SNAPSHOT_DIR" \
-                | while read -r f; do
-                    size=$(stat -c%s "$SNAPSHOT_DIR/$f" 2>/dev/null || stat -f%z "$SNAPSHOT_DIR/$f")
-                    printf '%s\t%s\n' "$size" "$SNAPSHOT_DIR/$f"
-                  done \
-                | sort -rn \
-                | while IFS=$'\t' read -r size path; do
-                    echo "COPY $path /models/qwen3.5-9b/$(basename "$path")"
-                  done
-            fi
+            echo "# --- Auto-generated COPY lines (one image layer per shard) ---"
+            for f in "$base-"*.gguf; do
+              echo "COPY $f /models/$(basename "$f")"
+            done
           } > Dockerfile
           echo "=== Generated Dockerfile ==="
+          cat Dockerfile
+
+      - name: Use template as-is (non-sharded entries)
+        if: matrix.shard != 'true'
+        env:
+          DOCKERFILE_TEMPLATE: ${{ matrix.dockerfile_template }}
+        run: |
+          cp "$DOCKERFILE_TEMPLATE" Dockerfile
+          echo "=== Dockerfile (template only) ==="
           cat Dockerfile
 
       - name: Set up Docker Buildx

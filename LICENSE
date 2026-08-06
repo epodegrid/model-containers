@@ -28,6 +28,7 @@ Each component retains its own license:
 - ik_llama.cpp (https://github.com/ikawrakow/ik_llama.cpp) — MIT
 - llama-swap      (https://github.com/mostlygeek/llama-swap)   — MIT
 - llama.cpp       (https://github.com/ggerganov/llama.cpp)     — MIT
-- vLLM            (https://github.com/vllm-project/vllm)       — Apache-2.0
 - Ornith-1.0-35B  (https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B) — MIT
-- Qwen3.5-9B      (https://huggingface.co/Qwen/Qwen3.5-9B)     — Apache-2.0
+- Gemma-4-12B-IT-QAT-Q4_0-GGUF (https://huggingface.co/google/gemma-4-12b-it-qat-q4_0-gguf) — Apache-2.0
+- Nomic Embed Text v1.5    (https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) — Apache-2.0
+- Nomic Embed Vision v1.5  (https://huggingface.co/nomic-ai/nomic-embed-vision-v1.5) — Apache-2.0

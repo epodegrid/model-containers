@@ -1,0 +1,34 @@
+healthCheckTimeout: 1800
+logLevel: info
+metricsMaxInMemory: 1000
+sendLoadingState: true
+includeAliasesInList: true
+
+models:
+  "wall-e":
+    proxy: "http://127.0.0.1:9999"
+    cmd: >
+      /app/llama-server
+      --model /models/gemma-4-12b-it-qat-q4_0-00001-of-00002.gguf
+      --alias wall-e
+      --port 9999
+      --parallel 1
+      --webui llamacpp
+      --jinja
+      --ctx-size 131072
+      -fa on
+      --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1
+    aliases:
+      - "wall-e"
+      - "gemma-4-12b"
+      - "google/gemma-4-12b-it-qat-q4_0"
+    filters:
+      setParamsByID:
+        "${MODEL_ID}:coding":
+          temperature: 0.6
+          presence_penalty: 0.0
+        "${MODEL_ID}:instruct":
+          temperature: 0.7
+          top_p: 0.8
+          chat_template_kwargs:
+            enable_thinking: false

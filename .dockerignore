@@ -5,8 +5,11 @@
 .dockerignore
 LICENSE
 README.md
+
+# Templates only — workflow reads them to generate the final Dockerfile,
+# but they don't belong inside any built image.
 Dockerfile.ik-llama.in
-Dockerfile.vllm.in
+go-4/Dockerfile.go-4.in
 
 # llama.cpp clone (built in CI for ik_llama sharding, then deleted)
 llama.cpp/
@@ -14,12 +17,19 @@ llama.cpp/
 # Default-exclude model files; the !-prefixed lines below re-include
 # the specific ones each image needs.
 *.gguf
-qwen3.5-9b-snapshot
-qwen3.5-9b-snapshot/**
 
-# Re-include sharded Ornith GGUF (ik_llama image)
+# Default-exclude go-4 snapshot directories; re-include below.
+go-4-snapshot-text
+go-4-snapshot-text/**
+go-4-snapshot-vision
+go-4-snapshot-vision/**
+
+# Re-include sharded GGUFs (eve + wall-e)
 !ornith-1.0-35b-Q4_K_M-*.gguf
+!gemma-4-12b-it-qat-q4_0-*.gguf
 
-# Re-include the vLLM model snapshot directory + contents
-!qwen3.5-9b-snapshot
-!qwen3.5-9b-snapshot/**
+# Re-include go-4 snapshots
+!go-4-snapshot-text
+!go-4-snapshot-text/**
+!go-4-snapshot-vision
+!go-4-snapshot-vision/**
