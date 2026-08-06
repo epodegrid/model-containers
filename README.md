@@ -1,24 +1,37 @@
 # model-containers
 
-Three container images for serving LLMs and embeddings on the Azure LLM
-platform. **All CPU** (E48as_v5 today, E48as_v7 when it lands); no GPU
-required (the T4 pool is air-gapped and the privileged-namespace policy
-blocks GPU driver DaemonSets anyway).
+Container images for serving LLMs and embeddings on the Azure LLM platform.
+**All CPU** (E48as_v5 today, E48as_v7 when it lands); no GPU required
+(the T4 pool is air-gapped and the privileged-namespace policy blocks GPU
+driver DaemonSets anyway).
 
-| Image | Engine | Model | Format | Hardware target |
+## Images
+
+Each ik_llama.cpp image is built twice — once for Zen 4 (current
+E48as_v5 hardware) and once for Zen 5 (E48as_v7 when it lands) — so the
+binary's ISA matches the node pool. The Zen 4 build uses `-march=znver4`;
+the Zen 5 build uses `-march=znver5` (which adds VNNI / BF16 / VBMI and
+flips `HAVE_FANCY_SIMD` on for the IQK VNNI kernels).
+
+| Image | Engine | Model | Format | Target ISA |
 |---|---|---|---|---|
-| `ghcr.io/epodegrid/eve:q4km`     | ik_llama.cpp (Zen4 build) | `deepreinforce-ai/Ornith-1.0-35B`        | GGUF Q4_K_M (5 shards × ~5 GB) | E48as_v5 (or v7) |
-| `ghcr.io/epodegrid/wall-e:q4_0`  | ik_llama.cpp (Zen4 build) | `google/gemma-4-12b-it-qat-q4_0`        | GGUF Q4_0   (2 shards × ~5 GB) | E48as_v5 (or v7) |
-| `ghcr.io/epodegrid/go-4:latest`  | Custom Python (FastAPI + transformers) | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | safetensors | E48as_v5 (or v7) |
+| `ghcr.io/epodegrid/eve:zen4`     | ik_llama.cpp (`-march=znver4`) | `deepreinforce-ai/Ornith-1.0-35B`        | GGUF Q4_K_M (5 shards × ~5 GB) | E48as_v5 (Zen 4) |
+| `ghcr.io/epodegrid/eve:zen5`     | ik_llama.cpp (`-march=znver5`) | same                                  | same                                | E48as_v7 (Zen 5) |
+| `ghcr.io/epodegrid/wall-e:zen4`  | ik_llama.cpp (`-march=znver4`) | `google/gemma-4-12b-it-qat-q4_0`        | GGUF Q4_0   (2 shards × ~5 GB) | E48as_v5 (Zen 4) |
+| `ghcr.io/epodegrid/wall-e:zen5`  | ik_llama.cpp (`-march=znver5`) | same                                  | same                                | E48as_v7 (Zen 5) |
+| `ghcr.io/epodegrid/go-4:latest`  | Custom Python (FastAPI + transformers) | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | safetensors | Either (ISA-agnostic) |
 
-> **Why a custom build of ik_llama.cpp?** The upstream `cpu-swap` image uses
-> `GGML_NATIVE=ON`, which only enables Zen4 features if its CI build host
-> happens to be Zen4. To guarantee the IQK GEMM kernels (`HAVE_FANCY_SIMD`)
-> run on our EPYC Genoa nodes, `Dockerfile.ik-llama.in` is a multi-stage
-> build that compiles ik_llama.cpp from source with explicit
-> `-DGGML_AVX512{,_VBMI,_VNNI,_BF16}=ON` flags (per upstream
-> `docs/build.md`). Without these flags, you silently fall back to AVX2 and
-> leave ~30-50% prompt-processing perf on the table.
+> **Why a custom build of ik_llama.cpp?** The upstream `cpu-swap` image
+> uses `GGML_NATIVE=ON`, which only enables Zen features if its CI build
+> host happens to be that Zen. More importantly, upstream's `CMakeLists.txt`
+> adds `-mavx512f -mavx512bw` for `GGML_AVX512=ON` but **does NOT add
+> `-mavx512dq`**, which the `v_tanh(__m512)` overload requires (gated on
+> `__AVX512F__ && __AVX512DQ__`). With whatever host CPU the upstream
+> image happens to build on, this can silently break the build.
+>
+> `Dockerfile.ik-llama.in` is a multi-stage build that compiles ik_llama.cpp
+> from source with explicit `-march=znver${ARCH}`. This pins the ISA to
+> the target Zen regardless of build host and resolves the DQ gap.
 
 ## Why these three
 
@@ -40,15 +53,17 @@ blocks GPU driver DaemonSets anyway).
 ## Local quick-start
 
 ```bash
-# eve — Ornith (CPU; no GPU needed)
-docker pull ghcr.io/epodegrid/eve:q4km
-docker run --rm -p 9292:8080 ghcr.io/epodegrid/eve:q4km
+# eve — Ornith (CPU; no GPU needed). Pick the ISA that matches your node.
+docker pull ghcr.io/epodegrid/eve:zen4      # for E48as_v5 (Zen 4)
+docker pull ghcr.io/epodegrid/eve:zen5      # for E48as_v7 (Zen 5, future)
+docker run --rm -p 9292:8080 ghcr.io/epodegrid/eve:zen4
 
 # wall-e — Gemma 4 12B
-docker pull ghcr.io/epodegrid/wall-e:q4_0
-docker run --rm -p 9293:8080 ghcr.io/epodegrid/wall-e:q4_0
+docker pull ghcr.io/epodegrid/wall-e:zen4
+docker pull ghcr.io/epodegrid/wall-e:zen5
+docker run --rm -p 9293:8080 ghcr.io/epodegrid/wall-e:zen4
 
-# go-4 — embedding service
+# go-4 — embedding service (single image, ISA-agnostic)
 docker pull ghcr.io/epodegrid/go-4:latest
 docker run --rm -p 9294:8000 ghcr.io/epodegrid/go-4:latest
 
@@ -86,13 +101,17 @@ Replace the image reference at the AKS deployment level:
 
 ```
 # Direct (only works if AKS nodes can reach ghcr.io)
-ghcr.io/epodegrid/eve:q4km
-ghcr.io/epodegrid/wall-e:q4_0
+ghcr.io/epodegrid/eve:zen4      # for Zen 4 nodes (E48as_v5)
+ghcr.io/epodegrid/eve:zen5      # for Zen 5 nodes (E48as_v7)
+ghcr.io/epodegrid/wall-e:zen4
+ghcr.io/epodegrid/wall-e:zen5
 ghcr.io/epodegrid/go-4:latest
 
 # Via Nexus (the org-default path — AKS nodes pull from Nexus, Nexus caches from GHCR)
-<nexus-host>:8081/<docker-proxy>/epodegrid/eve:q4km
-<nexus-host>:8081/<docker-proxy>/epodegrid/wall-e:q4_0
+<nexus-host>:8081/<docker-proxy>/epodegrid/eve:zen4
+<nexus-host>:8081/<docker-proxy>/epodegrid/eve:zen5
+<nexus-host>:8081/<docker-proxy>/epodegrid/wall-e:zen4
+<nexus-host>:8081/<docker-proxy>/epodegrid/wall-e:zen5
 <nexus-host>:8081/<docker-proxy>/epodegrid/go-4:latest
 ```
 
@@ -118,14 +137,19 @@ a matrix strategy. Per matrix entry:
 
 ### The ik_llama multi-stage build
 
+The ik_llama image matrix runs **4 builds per push** (eve × wall-e ×
+{zen4, zen5}). The Dockerfile is parameterized via `--build-arg ARCH=4|5`:
+
 ```
 FROM ubuntu:24.04 AS ik-llama-builder
+  ARG ARCH=4
   … build-essential, cmake, git, libcurl4-openssl-dev …
   git clone https://github.com/ikawrakow/ik_llama.cpp.git /src
   cmake -B build \
-    -DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON \
-    -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON -DGGML_OPENMP=ON \
-    -DGGML_IQK_FA_ALL_QUANTS=ON
+    -DGGML_NATIVE=OFF \
+    -DCMAKE_C_FLAGS="-march=znver${ARCH}" \
+    -DCMAKE_CXX_FLAGS="-march=znver${ARCH}" \
+    -DGGML_OPENMP=ON -DGGML_IQK_FA_ALL_QUANTS=ON
   cmake --build build --target llama-server -j$(nproc)
 
 FROM ghcr.io/ikawrakow/ik-llama-cpp:cpu-swap
@@ -133,6 +157,12 @@ FROM ghcr.io/ikawrakow/ik-llama-cpp:cpu-swap
   COPY config.yaml /app/config.yaml
   COPY <shards…> /models/
 ```
+
+For Zen 5, swap `${ARCH}` → `5` and the build picks up VNNI/BF16/VBMI
+automatically (because `znver5` defines them). For Zen 4 we leave the
+explicit `znver4` so we don't get the upstream CMakeLists's `-mavx512f
+-mavx512bw` partial set (which is missing the `-mavx512dq` that
+`v_tanh(__m512)` requires).
 
 Triggers:
 
@@ -142,15 +172,18 @@ Triggers:
 
 Image tags emitted per build (per matrix entry):
 
-- `ghcr.io/.../<name>:q4km` / `:q4_0` / `:latest` (per-image tag, default-branch only)
-- `ghcr.io/.../<name>:latest`                       (default-branch only)
-- `ghcr.io/.../<name>:<sha-prefix>`                 (every build)
+- `ghcr.io/.../<name>:zen4` / `:zen5` / `:latest`  (per-image tag, default-branch only)
+- `ghcr.io/.../<name>:<sha-prefix>`                (every build)
+
+The matrix produces 5 images per default-branch push: `eve:zen4`,
+`eve:zen5`, `wall-e:zen4`, `wall-e:zen5`, `go-4:latest`.
 
 ## Updating to a newer model / quant
 
-For **eve / wall-e**: edit the matrix entry's `hf_repo` / `hf_filename` /
-`image_tag`, update `--model` path in `models/<id>/config.yaml` if shard
-count changes, push.
+For **eve / wall-e**: edit the matrix entries' `hf_repo` / `hf_filename`,
+update `--model` path in `models/<id>/config.yaml` if shard count changes,
+push. Both Zen 4 and Zen 5 builds need updating (4 entries total: 2 models
+× 2 ISAs).
 
 For **go-4**: edit the matrix entry's `hf_repos` and `hf_snapshot_dirs`
 (one per line), push.
@@ -182,12 +215,16 @@ To swap engines, add another matrix entry with the appropriate
 
 - **No real EPYC Genoa benchmark yet.** The brief's table estimates ~20-40
   tok/s single-stream at Q4 on Genoa with ik_llama, possibly 30-60 tok/s
-  with MTP. The custom Zen4 build should hit the upper end of that range.
-  We need an actual `llama-bench` run on the E48as_v5 node to confirm
-  `HAVE_FANCY_SIMD` is firing and not silently falling back to AVX2.
+  with MTP. We need an actual `llama-bench` run on the E48as_v5 node to
+  confirm the build is on the right ISA and not silently falling back.
 - **No published Ornith MTP GGUF found.** MTP (1.4-2.2x lever) would
   roughly double throughput headroom toward the 40-50 tok/s commercial
   median. If deepreinforce-ai publishes one, just swap the matrix entry.
+- **Zen 4 lacks VNNI / BF16 / VBMI.** So `HAVE_FANCY_SIMD` (which is
+  gated on `__AVX512VNNI__`) is **NOT** defined on the `zen4` build —
+  we get the AVX-512 base path, not the IQK VNNI kernels. Zen 4 uses
+  256-bit double-pumped AVX-512 (~30-50% faster than AVX2). The `zen5`
+  build gets the full IQK VNNI kernels because znver5 has VNNI.
 - **Go-4 loads both text + vision encoders at startup.** That's ~500 MB
   of weights + ~500 MB of PyTorch CPU. The cold-start time on a 24-core
   Genoa node should be ~10-15 s. If we add image batching later, switch
@@ -197,11 +234,3 @@ To swap engines, add another matrix entry with the appropriate
   whether Nexus can pull public GHCR repos directly or needs a private
   upstream + creds is still an open org-policy question. Doesn't affect
   building/pushing to GHCR; only affects how AKS pulls the image.
-- **GGML_NATIVE + GGML_AVX512_* on the upstream image.** Verified: the
-  five flags `-DGGML_AVX512F`, `-DGGML_AVX512VNNI`, `-DGGML_AVX512VL`,
-  `-DGGML_AVX512BW`, `-DGGML_AVX512DQ` together flip `HAVE_FANCY_SIMD` on
-  Zen4 (per `docs/build.md`). The build container runs on a stock GitHub
-  Actions Ubuntu runner (probably Zen3/Zen4 EPYC); even if it's not Zen4,
-  the explicit AVX-512 flags still take effect because they're passed
-  verbatim to the compiler. The compiled binary then runs unchanged on
-  E48as_v5 (or v7).

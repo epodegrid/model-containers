@@ -5,7 +5,13 @@
 # (vision feeds into an LLM decoder), not standalone image-embedding
 # servers. So we wrap the HuggingFace transformers model directly in a
 # small FastAPI service.
+#
+# This is a single image (Python + PyTorch runtime dispatches the right ISA
+# at runtime), but we accept ARCH=4/5 from the workflow for build-arg
+# uniformity with the ik_llama matrix entries.
 FROM python:3.11-slim
+
+ARG ARCH=4
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

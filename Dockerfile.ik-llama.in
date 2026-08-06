@@ -1,15 +1,26 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: build ik_llama.cpp from source with Zen4 (AMD EPYC Genoa / E48as_v5)
-# IQK GEMM kernels via the HAVE_FANCY_SIMD path.
+# Stage 1: build ik_llama.cpp from source, targeting a specific AMD Zen ISA.
 #
-# Upstream cpu-swap image uses GGML_NATIVE=ON, which only enables Zen4 features
-# if the CI build host happens to be Zen4. To guarantee Zen4 performance on
-# E48as_v5 (and the upcoming v7), we build explicitly with the AVX-512 family
-# flags documented in ik_llama.cpp's docs/build.md "CPU build flags for AVX-512".
+# Pass `ARCH=4` (Zen 4 / EPYC Genoa / current E48as_v5) or `ARCH=5` (Zen 5 /
+# upcoming E48as_v7) via --build-arg. Defaults to ARCH=4.
+#
+# We target the ISA explicitly with `-march=znver${ARCH}` rather than
+# relying on `GGML_NATIVE=ON`. The latter resolves to `-march=native` on
+# whatever the build host happens to be (Cascade Lake, Sapphire Rapids,
+# etc. on GitHub Actions), and GGML_AVX512=ON in upstream's CMakeLists
+# adds `-mavx512f -mavx512bw` but NOT `-mavx512dq` — which breaks the
+# `v_tanh(__m512)` overload (gated on `__AVX512F__ && __AVX512DQ__`).
+# `-march=znver${ARCH}` is reproducible across CI host CPU changes.
+#
+# Zen 4 lacks AVX-512 VNNI / BF16 / VBMI (those are Zen 5), so
+# HAVE_FANCY_SIMD is *not* defined for ARCH=4 — we get the AVX-512 base
+# path (Zen 4's 256-bit double-pumped ops, ~30-50% over AVX2). For
+# ARCH=5, HAVE_FANCY_SIMD flips on automatically because znver5 has VNNI.
 FROM ubuntu:24.04 AS ik-llama-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG ARCH=4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -23,25 +34,22 @@ RUN git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git /src
 
 WORKDIR /src
 
-# Zen4 / AVX-512 build: GGML_NATIVE + the four GGML_AVX512_* flags are the
-# shortest path that flips HAVE_FANCY_SIMD on (per docs/build.md). The
-# IQK quantized matmul hot path then uses 256-bit double-pumped AVX-512
-# (vnni + vbmi + bf16) on Zen4 — ~30-50% faster than the AVX2 fallback.
+# Explicit Zen N target. Drops GGML_AVX512_VNNI / _BF16 / _VBMI because
+# those aren't on Zen 4, and forcing them via -mavx512{b,v}mi would
+# generate illegal instructions at runtime on Zen 4 hardware.
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_NATIVE=ON \
-        -DGGML_AVX512=ON \
-        -DGGML_AVX512_VBMI=ON \
-        -DGGML_AVX512_VNNI=ON \
-        -DGGML_AVX512_BF16=ON \
+        -DGGML_NATIVE=OFF \
+        -DCMAKE_C_FLAGS="-march=znver${ARCH}" \
+        -DCMAKE_CXX_FLAGS="-march=znver${ARCH}" \
         -DGGML_OPENMP=ON \
         -DGGML_IQK_FA_ALL_QUANTS=ON
 
 RUN cmake --build build --config Release -j"$(nproc)" --target llama-server
 
 # Stage 2: runtime — use upstream cpu-swap image as base for llama-swap +
-# base libs, then replace /app/llama-server with our Zen4-optimized build.
+# base libs, then replace /app/llama-server with our Zen-N build.
 # llama-swap (config.yaml driven) keeps working unchanged; only the
-# downstream llama-server binary gets the Zen4 IQK kernels.
+# downstream llama-server binary is rebuilt for the target ISA.
 FROM ghcr.io/ikawrakow/ik-llama-cpp:cpu-swap
 
 COPY --from=ik-llama-builder /src/build/bin/llama-server /app/llama-server
