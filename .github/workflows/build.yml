@@ -45,6 +45,11 @@ jobs:
             smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
+            # ~21 GB of Ornith-35B shards. Exporting a third copy into the
+            # Docker daemon (build context + buildkit layers + daemon) fills
+            # even a 145 GB runner: "No space left on device". Pull it back
+            # after the build instead, once the cache and shards are freed.
+            build_load: 'false'
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
@@ -59,6 +64,7 @@ jobs:
             smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 120
             smoke_ctx: '4096'
+            build_load: 'true'
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
@@ -81,6 +87,7 @@ jobs:
             smoke_heavy_path: /v1/embeddings
             smoke_heavy_body: '{"model":"nomic-embed-vision-v1.5","input":"smoke test"}'
             smoke_heavy_timeout: 90
+            build_load: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -234,7 +241,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          load: true
+          load: ${{ matrix.build_load }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

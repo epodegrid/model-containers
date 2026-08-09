@@ -46,11 +46,18 @@ echo "=== Smoke test: $IMAGE ==="
 echo "Config: health=$HEALTH_PATH models=${MODELS_PATH:-<skip>} heavy=${HEAVY_PATH:-<skip>} port=$PORT"
 
 if [ "$SKIP_RUN" != "1" ]; then
-  # `load: true` on the build step already put this exact image in the local
-  # Docker daemon, so we deliberately do NOT `docker pull` here — that used to
-  # re-download every layer straight after pushing it, which on the multi-GB
-  # sharded GGUF images burned 4+ minutes of the health-wait budget before the
-  # container had even started.
+  # The build step loads the image into the local Docker daemon when it can, so
+  # normally there is nothing to pull. eve is the exception: at ~21 GB a third
+  # local copy fills the runner ("No space left on device"), so it builds with
+  # load disabled and we fetch it here — after the caller has freed the
+  # buildkit cache and the shards, which is what makes room for it.
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "Image already in the local daemon; skipping pull."
+  else
+    echo "Image not loaded locally; pulling..."
+    docker pull "$IMAGE"
+  fi
+
   #
   # --network=host so curl on the runner's localhost reaches the container's
   # port directly. No --rm, so a crashed container stays inspectable.
