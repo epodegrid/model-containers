@@ -10,7 +10,53 @@ CHAT (vision feeds into an LLM decoder), not standalone image-embedding
 servers. So we wrap the HuggingFace transformers model directly.
 """
 
+# IMPORTANT: monkey-patch huggingface_hub's strict type validator BEFORE any
+# transformers imports. The NomicBERT custom config class declares fields
+# with specific types (e.g. hidden_dropout_prob: float), and the JSON on
+# HF Hub serializes some values as ints where float is expected (and vice
+# versa). Recent huggingface_hub enforces strict type validation that
+# rejects these mismatches. We wrap type_validator to attempt an int↔float
+# coercion before raising — no behavior change for correctly-typed configs.
 from __future__ import annotations
+
+import typing as _typing
+
+import huggingface_hub.dataclasses as _hf_dc
+
+_orig_type_validator = _hf_dc.type_validator
+
+
+def _coercing_type_validator(name: str, value: Any, expected_type: Any) -> None:
+    """Wrap type_validator: attempt int↔float coercion on TypeError."""
+    # Direct int↔float coercion for simple (non-Union, non-Optional) types.
+    if expected_type is float and isinstance(value, int) and not isinstance(value, bool):
+        return _orig_type_validator(name, float(value), expected_type)
+    if expected_type is int and isinstance(value, float) and value.is_integer():
+        return _orig_type_validator(name, int(value), expected_type)
+
+    # Union / Optional: recurse into each member with coercion enabled.
+    origin = _typing.get_origin(expected_type)
+    if origin is _typing.Union:
+        args = _typing.get_args(expected_type)
+        last_err: TypeError | None = None
+        for t in args:
+            try:
+                return _coercing_type_validator(name, value, t)
+            except TypeError as e:
+                last_err = e
+                continue
+        if last_err is not None:
+            raise last_err
+        return None
+
+    return _orig_type_validator(name, value, expected_type)
+
+
+_hf_dc.type_validator = _coercing_type_validator
+
+# ---------------------------------------------------------------------------
+# Now safe to import transformers + everything else.
+# ---------------------------------------------------------------------------
 
 import base64
 import io
@@ -48,7 +94,8 @@ def mean_pooling(model_output: torch.Tensor, attention_mask: torch.Tensor) -> to
 def load_models() -> tuple[Any, Any, Any, Any]:
     log.info("Loading text model from %s", TEXT_MODEL_PATH)
     tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_PATH)
-    text_model = AutoModel.from_pretrained(TEXT_MODEL_PATH)
+    # Text model is also NomicBert under the hood — needs trust_remote_code.
+    text_model = AutoModel.from_pretrained(TEXT_MODEL_PATH, trust_remote_code=True)
     text_model.eval()
 
     log.info("Loading vision model from %s", VISION_MODEL_PATH)

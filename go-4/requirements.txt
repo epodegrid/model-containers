@@ -2,7 +2,12 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 torch>=2.5 --index-url https://download.pytorch.org/whl/cpu
 torchvision>=0.20 --index-url https://download.pytorch.org/whl/cpu
-transformers>=4.55
+# Pin transformers below 5.0: the NomicBERT custom code on HF Hub
+# (configuration_hf_nomic_bert.py / modeling_hf_nomic_bert.py) hasn't been
+# updated for transformers 5.x's renamed `all_tied_weights_keys` API.
+# 4.50 still uses the older `_tied_weights_keys` that the model code expects.
+transformers>=4.50,<5.0
+einops           # required by NomicBERT vision encoder (einsum ops)
 pillow>=11
 requests>=2.32
 pydantic>=2.9
