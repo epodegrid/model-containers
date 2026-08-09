@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python deps. PyTorch CPU wheels from the official index so we don't
 # pull the (huge) CUDA-enabled default.
 COPY go-4/requirements.txt /app/requirements.txt
+# torch + torchvision both come from PyTorch's CPU index; pip needs both
+# package lines to share the same --index-url, which the per-line syntax
+# in requirements.txt handles cleanly.
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Service code.
