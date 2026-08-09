@@ -124,6 +124,48 @@ jobs:
               raise SystemExit(f"unknown download mode: {mode}")
           PY
 
+      # Patch downloaded model configs to work around strict type validation
+      # in recent huggingface_hub. Some older model configs (notably the
+      # nomic-bert-2048 used by nomic-embed-text-v1.5) have whole-number
+      # float values where int is expected, which fails loading under
+      # huggingface_hub's StrictDataclassFieldValidationError. Coercing
+      # float→int in whole-number fields is a no-op for correct configs
+      # and unblocks broken ones.
+      - name: Patch model configs (whole-number float → int)
+        run: |
+          python - <<'PY'
+          import json, pathlib
+
+          def coerce(o):
+              if isinstance(o, dict):
+                  return {k: coerce(v) for k, v in o.items()}
+              if isinstance(o, list):
+                  return [coerce(v) for v in o]
+              if isinstance(o, float) and o.is_integer():
+                  return int(o)
+              return o
+
+          patched = []
+          for path in pathlib.Path(".").glob("**/config.json"):
+              # Skip HF cache paths we don't own.
+              if "/.cache/" in str(path):
+                  continue
+              with open(path) as f:
+                  cfg = json.load(f)
+              original = json.dumps(cfg, sort_keys=True)
+              cfg = coerce(cfg)
+              if json.dumps(cfg, sort_keys=True) != original:
+                  with open(path, "w") as f:
+                      json.dump(cfg, f, indent=2)
+                  patched.append(str(path))
+          if patched:
+              print("Patched configs:")
+              for p in patched:
+                  print(f"  {p}")
+          else:
+              print("No config patches needed.")
+          PY
+
       - name: Build llama-gguf-split
         if: matrix.shard == 'true'
         run: |
