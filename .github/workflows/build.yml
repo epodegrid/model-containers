@@ -31,6 +31,10 @@ jobs:
             hf_filename: ornith-1.0-35b-Q4_K_M.gguf
             shard: 'true'
             image_tag: latest
+            smoke_quick_path: /v1/models
+            smoke_heavy_path: /v1/chat/completions
+            smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
+            smoke_heavy_timeout: 180
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
@@ -39,6 +43,10 @@ jobs:
             hf_filename: gemma-4-12b-it-qat-q4_0.gguf
             shard: 'true'
             image_tag: latest
+            smoke_quick_path: /v1/models
+            smoke_heavy_path: /v1/chat/completions
+            smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
+            smoke_heavy_timeout: 120
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
@@ -50,6 +58,10 @@ jobs:
               go-4-snapshot-vision
             shard: 'false'
             image_tag: latest
+            smoke_quick_path: /health
+            smoke_heavy_path: /v1/embeddings
+            smoke_heavy_body: '{"model":"nomic-embed-vision-v1.5","input":"smoke test"}'
+            smoke_heavy_timeout: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -192,3 +204,71 @@ jobs:
           build-args: |
             MODEL_CONFIG=${{ matrix.config_path }}
           provenance: false
+
+      - name: Smoke test (pull + run + hit endpoints)
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ steps.meta.outputs.version }}
+          QUICK_PATH: ${{ matrix.smoke_quick_path }}
+          HEAVY_PATH: ${{ matrix.smoke_heavy_path }}
+          HEAVY_BODY: ${{ matrix.smoke_heavy_body }}
+          HEAVY_TIMEOUT: ${{ matrix.smoke_heavy_timeout }}
+        run: |
+          set -e
+
+          echo "=== Smoke test: $IMAGE ==="
+          echo "Pulling..."
+          docker pull "$IMAGE"
+
+          # Run container. The ik_llama images listen on 8080 internally
+          # (llama-swap), the go-4 image also listens on 8080 (uvicorn).
+          # All three use port 8080 → no per-image port map needed.
+          container_id=$(docker run -d --rm --shm-size=2g "$IMAGE")
+          trap "docker stop $container_id >/dev/null 2>&1 || true" EXIT
+
+          echo "Container: $container_id"
+          echo "Waiting for quick endpoint $QUICK_PATH..."
+
+          # Wait up to ~4 min for the quick endpoint to respond.
+          for i in $(seq 1 120); do
+            if curl -sf "http://localhost:8080$QUICK_PATH" > /dev/null 2>&1; then
+              echo "  quick endpoint up after $((i * 2))s"
+              break
+            fi
+            sleep 2
+          done
+
+          if ! curl -sf "http://localhost:8080$QUICK_PATH" > /tmp/smoke_quick.txt; then
+            echo "FAIL: $QUICK_PATH never responded"
+            echo "--- container logs ---"
+            docker logs "$container_id" 2>&1 | tail -80
+            exit 1
+          fi
+          echo "Quick response: $(cat /tmp/smoke_quick.txt)"
+
+          # For ik_llama images, also verify the wrapper dispatched to a
+          # CPU-specific binary (sanity check the Zen dispatch is working).
+          if [ "$QUICK_PATH" = "/v1/models" ]; then
+            dispatch=$(docker logs "$container_id" 2>&1 | grep -m1 llama-server-wrapper || true)
+            if [ -n "$dispatch" ]; then
+              echo "Zen dispatch log: $dispatch"
+            fi
+          fi
+
+          # Heavy endpoint: this is the one that loads the model and
+          # actually exercises the inference path. Set the timeout
+          # generously — first-call model load for 35B Ornith is ~60-90s.
+          echo "Hitting heavy endpoint $HEAVY_PATH (timeout ${HEAVY_TIMEOUT}s)..."
+          if ! curl -sf -X POST "http://localhost:8080$HEAVY_PATH" \
+              -H 'Content-Type: application/json' \
+              -d "$HEAVY_BODY" \
+              --max-time "$HEAVY_TIMEOUT" > /tmp/smoke_heavy.txt; then
+            echo "FAIL: $HEAVY_PATH timed out or errored"
+            echo "--- container logs ---"
+            docker logs "$container_id" 2>&1 | tail -80
+            exit 1
+          fi
+          echo "Heavy response (first 500 bytes):"
+          head -c 500 /tmp/smoke_heavy.txt
+          echo
+
+          echo "=== Smoke test PASSED ==="
