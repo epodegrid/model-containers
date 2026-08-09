@@ -31,7 +31,8 @@ jobs:
             hf_filename: ornith-1.0-35b-Q4_K_M.gguf
             shard: 'true'
             image_tag: latest
-            smoke_quick_path: /v1/models
+            smoke_health_path: /health
+            smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
@@ -43,7 +44,8 @@ jobs:
             hf_filename: gemma-4-12b-it-qat-q4_0.gguf
             shard: 'true'
             image_tag: latest
-            smoke_quick_path: /v1/models
+            smoke_health_path: /health
+            smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 120
@@ -58,7 +60,8 @@ jobs:
               go-4-snapshot-vision
             shard: 'false'
             image_tag: latest
-            smoke_quick_path: /health
+            smoke_health_path: /health
+            smoke_models_path: ''
             smoke_heavy_path: /v1/embeddings
             smoke_heavy_body: '{"model":"nomic-embed-vision-v1.5","input":"smoke test"}'
             smoke_heavy_timeout: 90
@@ -208,7 +211,8 @@ jobs:
       - name: Smoke test (pull + run + hit endpoints)
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ steps.meta.outputs.version }}
-          QUICK_PATH: ${{ matrix.smoke_quick_path }}
+          HEALTH_PATH: ${{ matrix.smoke_health_path }}
+          MODELS_PATH: ${{ matrix.smoke_models_path }}
           HEAVY_PATH: ${{ matrix.smoke_heavy_path }}
           HEAVY_BODY: ${{ matrix.smoke_heavy_body }}
           HEAVY_TIMEOUT: ${{ matrix.smoke_heavy_timeout }}
@@ -219,52 +223,68 @@ jobs:
           echo "Pulling..."
           docker pull "$IMAGE"
 
-          # Run container. The ik_llama images listen on 8080 internally
-          # (llama-swap), the go-4 image also listens on 8080 (uvicorn).
-          # All three use port 8080 → no per-image port map needed.
-          container_id=$(docker run -d --rm --shm-size=2g "$IMAGE")
-          trap "docker stop $container_id >/dev/null 2>&1 || true" EXIT
+          # Run container WITHOUT --rm so a crashed container's logs
+          # remain inspectable. All three images listen on 8080 inside.
+          container_name="smoke-${{ matrix.image_name }}-$$"
+          container_id=$(docker run -d --name "$container_name" --shm-size=2g "$IMAGE")
 
-          echo "Container: $container_id"
-          echo "Waiting for quick endpoint $QUICK_PATH..."
+          # Stream container logs to file in background. Survives the
+          # container crashing because we're reading from the named
+          # container (not the exited-process handle).
+          log_file=/tmp/smoke_container_$$.log
+          docker logs -f "$container_id" > "$log_file" 2>&1 &
+          logs_pid=$!
+          trap "kill $logs_pid 2>/dev/null || true; docker stop $container_id >/dev/null 2>&1 || true; docker rm $container_id >/dev/null 2>&1 || true" EXIT
 
-          # Wait up to ~4 min for the quick endpoint to respond.
+          echo "Container: $container_id (logs: $log_file)"
+
+          dump_logs() {
+            echo "--- container logs (last 100 lines) ---"
+            tail -100 "$log_file" 2>/dev/null || echo "(no logs captured)"
+          }
+
+          # ---------- /health (always works once the wrapper/router is up) ----------
+          echo "Waiting for $HEALTH_PATH..."
           for i in $(seq 1 120); do
-            if curl -sf "http://localhost:8080$QUICK_PATH" > /dev/null 2>&1; then
-              echo "  quick endpoint up after $((i * 2))s"
+            if curl -sf "http://localhost:8080$HEALTH_PATH" > /dev/null 2>&1; then
+              echo "  $HEALTH_PATH up after $((i * 2))s"
               break
             fi
             sleep 2
           done
 
-          if ! curl -sf "http://localhost:8080$QUICK_PATH" > /tmp/smoke_quick.txt; then
-            echo "FAIL: $QUICK_PATH never responded"
-            echo "--- container logs ---"
-            docker logs "$container_id" 2>&1 | tail -80
+          if ! curl -sf "http://localhost:8080$HEALTH_PATH" > /tmp/smoke_health.txt; then
+            echo "FAIL: $HEALTH_PATH never responded"
+            dump_logs
             exit 1
           fi
-          echo "Quick response: $(cat /tmp/smoke_quick.txt)"
+          echo "/health response: $(cat /tmp/smoke_health.txt)"
 
-          # For ik_llama images, also verify the wrapper dispatched to a
-          # CPU-specific binary (sanity check the Zen dispatch is working).
-          if [ "$QUICK_PATH" = "/v1/models" ]; then
-            dispatch=$(docker logs "$container_id" 2>&1 | grep -m1 llama-server-wrapper || true)
-            if [ -n "$dispatch" ]; then
-              echo "Zen dispatch log: $dispatch"
-            fi
+          # On ik_llama images, verify the wrapper dispatched to a Zen binary.
+          if grep -q llama-server-wrapper "$log_file" 2>/dev/null; then
+            dispatch=$(grep -m1 llama-server-wrapper "$log_file")
+            echo "Zen dispatch: $dispatch"
           fi
 
-          # Heavy endpoint: this is the one that loads the model and
-          # actually exercises the inference path. Set the timeout
-          # generously — first-call model load for 35B Ornith is ~60-90s.
-          echo "Hitting heavy endpoint $HEAVY_PATH (timeout ${HEAVY_TIMEOUT}s)..."
+          # ---------- /v1/models (ik_llama only) — verifies model config loaded ----------
+          if [ -n "$MODELS_PATH" ]; then
+            echo "Hitting $MODELS_PATH..."
+            if ! curl -sf "http://localhost:8080$MODELS_PATH" > /tmp/smoke_models.txt; then
+              echo "FAIL: $MODELS_PATH failed"
+              dump_logs
+              exit 1
+            fi
+            echo "/v1/models response: $(cat /tmp/smoke_models.txt)"
+          fi
+
+          # ---------- Heavy endpoint (model load + tiny inference) ----------
+          echo "Hitting $HEAVY_PATH (timeout ${HEAVY_TIMEOUT}s)..."
           if ! curl -sf -X POST "http://localhost:8080$HEAVY_PATH" \
               -H 'Content-Type: application/json' \
               -d "$HEAVY_BODY" \
               --max-time "$HEAVY_TIMEOUT" > /tmp/smoke_heavy.txt; then
             echo "FAIL: $HEAVY_PATH timed out or errored"
-            echo "--- container logs ---"
-            docker logs "$container_id" 2>&1 | tail -80
+            dump_logs
             exit 1
           fi
           echo "Heavy response (first 500 bytes):"
