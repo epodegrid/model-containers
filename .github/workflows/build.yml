@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'Dockerfile.ik-llama.in'
+      - 'wrapper.sh'
       - 'go-4/**'
       - 'models/**'
       - '.github/workflows/build.yml'
@@ -22,7 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # eve (Ornith-1.0-35B) on Zen 4 (E48as_v5)
           - image_name: eve
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/ornith-1.0-35b/config.yaml
@@ -30,19 +30,7 @@ jobs:
             hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
             hf_filename: ornith-1.0-35b-Q4_K_M.gguf
             shard: 'true'
-            arch: 4
-            image_tag: zen4
-          # eve on Zen 5 (E48as_v7 when it lands)
-          - image_name: eve
-            dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/ornith-1.0-35b/config.yaml
-            download_mode: single
-            hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
-            hf_filename: ornith-1.0-35b-Q4_K_M.gguf
-            shard: 'true'
-            arch: 5
-            image_tag: zen5
-          # wall-e (Gemma-4-12B-IT-QAT-Q4_0) on Zen 4
+            image_tag: latest
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
@@ -50,20 +38,7 @@ jobs:
             hf_repo: google/gemma-4-12b-it-qat-q4_0-gguf
             hf_filename: gemma-4-12b-it-qat-q4_0.gguf
             shard: 'true'
-            arch: 4
-            image_tag: zen4
-          # wall-e on Zen 5
-          - image_name: wall-e
-            dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
-            download_mode: single
-            hf_repo: google/gemma-4-12b-it-qat-q4_0-gguf
-            hf_filename: gemma-4-12b-it-qat-q4_0.gguf
-            shard: 'true'
-            arch: 5
-            image_tag: zen5
-          # go-4 (Nomic multimodal embedding service) — single image,
-          # Python is ISA-agnostic via PyTorch runtime dispatch.
+            image_tag: latest
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
@@ -74,7 +49,6 @@ jobs:
               go-4-snapshot-text
               go-4-snapshot-vision
             shard: 'false'
-            arch: 4
             image_tag: latest
     steps:
       - name: Checkout
@@ -217,5 +191,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             MODEL_CONFIG=${{ matrix.config_path }}
-            ARCH=${{ matrix.arch }}
           provenance: false

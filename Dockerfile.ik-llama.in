@@ -1,26 +1,27 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: build ik_llama.cpp from source, targeting a specific AMD Zen ISA.
+# Multi-stage build that compiles ik_llama.cpp for Zen 3, Zen 4, and Zen 5,
+# then bundles all three binaries in one runtime image. A wrapper at
+# /app/llama-server detects the host CPU at startup (via /proc/cpuinfo)
+# and exec's the matching binary, so the same image runs unmodified on
+# whatever Azure decides to give us (Milan/Zen3, Genoa/Zen4, or Turin/Zen5).
 #
-# Pass `ARCH=4` (Zen 4 / EPYC Genoa / current E48as_v5) or `ARCH=5` (Zen 5 /
-# upcoming E48as_v7) via --build-arg. Defaults to ARCH=4.
+# Build flags per ISA:
+#   Zen 3 (Milan):  -march=znver3            (F, CD, BW, DQ; no VL)
+#   Zen 4 (Genoa): -march=znver4            (adds VL)
+#   Zen 5 (Turin): -march=znver4 + Zen5 ISAs (adds VNNI/BF16/VBMI/VBMI2)
 #
-# We target the ISA explicitly with `-march=znver${ARCH}` rather than
-# relying on `GGML_NATIVE=ON`. The latter resolves to `-march=native` on
-# whatever the build host happens to be (Cascade Lake, Sapphire Rapids,
-# etc. on GitHub Actions), and GGML_AVX512=ON in upstream's CMakeLists
-# adds `-mavx512f -mavx512bw` but NOT `-mavx512dq` — which breaks the
-# `v_tanh(__m512)` overload (gated on `__AVX512F__ && __AVX512DQ__`).
-# `-march=znver${ARCH}` is reproducible across CI host CPU changes.
-#
-# Zen 4 lacks AVX-512 VNNI / BF16 / VBMI (those are Zen 5), so
-# HAVE_FANCY_SIMD is *not* defined for ARCH=4 — we get the AVX-512 base
-# path (Zen 4's 256-bit double-pumped ops, ~30-50% over AVX2). For
-# ARCH=5, HAVE_FANCY_SIMD flips on automatically because znver5 has VNNI.
-FROM ubuntu:24.04 AS ik-llama-builder
+# GCC 13 (Ubuntu 24.04 default) doesn't recognize `-march=znver5`
+# (added in GCC 14); we emulate it with the equivalent ISA flags. Same
+# instruction set is emitted, runs unchanged on real Zen 5 silicon.
+
+# -----------------------------------------------------------------------------
+# Stage `base`: shared build deps + ik_llama.cpp source. Each ISA builder
+# extends from this stage so the apt install and git clone happen once.
+# -----------------------------------------------------------------------------
+FROM ubuntu:24.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG ARCH=4
 
 RUN apt-get update \
         || (echo "apt-get update failed, retrying in 30s..." && sleep 30 && apt-get update) \
@@ -35,38 +36,72 @@ RUN apt-get update \
 
 RUN git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git /src
 
+# -----------------------------------------------------------------------------
+# Zen 3 (Milan) — AVX-512F/CD/BW/DQ. No VL, no VNNI/BF16/VBMI. Runs on
+# Zen 3 natively; runs in downward-compat mode on Zen 4/5 (small perf cost).
+# HAVE_FANCY_SIMD is NOT defined here (gated on VNNI).
+# -----------------------------------------------------------------------------
+FROM base AS zen3-builder
 WORKDIR /src
-
-# Explicit Zen N target.
-#
-# GCC 13 (Ubuntu 24.04 default) doesn't know `-march=znver5` — that
-# value was added in GCC 14. For ARCH=5 we emulate Zen 5 with `znver4`
-# + the Zen 5-only AVX-512 extensions. The instruction set produced
-# is the same one GCC 14's `-march=znver5` emits. On real Zen 5
-# hardware this binary will run correctly; on Zen 4 hardware it
-# would crash (illegal VNNI/BF16/VBMI/VBMI2). When we move to a base
-# image with GCC 14+, switch this back to `-march=znver${ARCH}`.
-RUN if [ "$ARCH" = "5" ]; then \
-        MARCH_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2"; \
-    else \
-        MARCH_FLAGS="-march=znver4"; \
-    fi && \
-    cmake -B build -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
-        -DCMAKE_C_FLAGS="$MARCH_FLAGS" \
-        -DCMAKE_CXX_FLAGS="$MARCH_FLAGS" \
+        -DCMAKE_C_FLAGS="-march=znver3" \
+        -DCMAKE_CXX_FLAGS="-march=znver3" \
         -DGGML_OPENMP=ON \
         -DGGML_IQK_FA_ALL_QUANTS=ON
-
 RUN cmake --build build --config Release -j"$(nproc)" --target llama-server
+RUN mkdir -p /out && cp build/bin/llama-server /out/llama-server.zen3
 
-# Stage 2: runtime — use upstream cpu-swap image as base for llama-swap +
-# base libs, then replace /app/llama-server with our Zen-N build.
-# llama-swap (config.yaml driven) keeps working unchanged; only the
-# downstream llama-server binary is rebuilt for the target ISA.
+# -----------------------------------------------------------------------------
+# Zen 4 (Genoa) — adds AVX-512VL. Runs on Zen 4 natively. Crashes on
+# Zen 3 (no VL) and on Zen 5 only if VNNI instructions are emitted
+# (they aren't with this build, so it's safe on Zen 5 too, just
+# missing the Zen 5-specific IQK VNNI kernels).
+# -----------------------------------------------------------------------------
+FROM base AS zen4-builder
+WORKDIR /src
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_NATIVE=OFF \
+        -DCMAKE_C_FLAGS="-march=znver4" \
+        -DCMAKE_CXX_FLAGS="-march=znver4" \
+        -DGGML_OPENMP=ON \
+        -DGGML_IQK_FA_ALL_QUANTS=ON
+RUN cmake --build build --config Release -j"$(nproc)" --target llama-server
+RUN mkdir -p /out && cp build/bin/llama-server /out/llama-server.zen4
+
+# -----------------------------------------------------------------------------
+# Zen 5 (Turin) — adds VNNI/BF16/VBMI/VBMI2 to the Zen 4 set. HAVE_FANCY_SIMD
+# flips on, so the IQK VNNI kernels are selected at runtime. Crashes on
+# Zen 3 (no VL) and on Zen 4 (no VNNI). Use this only on real Zen 5 hardware.
+# -----------------------------------------------------------------------------
+FROM base AS zen5-builder
+WORKDIR /src
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_NATIVE=OFF \
+        -DCMAKE_C_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2" \
+        -DCMAKE_CXX_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2" \
+        -DGGML_OPENMP=ON \
+        -DGGML_IQK_FA_ALL_QUANTS=ON
+RUN cmake --build build --config Release -j"$(nproc)" --target llama-server
+RUN mkdir -p /out && cp build/bin/llama-server /out/llama-server.zen5
+
+# -----------------------------------------------------------------------------
+# Stage `runtime`: use upstream cpu-swap image as base for llama-swap +
+# base libs. Bundle all three ISA-built llama-server binaries plus the
+# CPU-detecting wrapper. llama-swap still uses /app/llama-server as the
+# cmd path in config.yaml — the wrapper transparently dispatches to the
+# right binary.
+# -----------------------------------------------------------------------------
 FROM ghcr.io/ikawrakow/ik-llama-cpp:cpu-swap
 
-COPY --from=ik-llama-builder /src/build/bin/llama-server /app/llama-server
+COPY --from=zen3-builder /out/llama-server.zen3 /app/llama-server.zen3
+COPY --from=zen4-builder /out/llama-server.zen4 /app/llama-server.zen4
+COPY --from=zen5-builder /out/llama-server.zen5 /app/llama-server.zen5
+
+# Wrapper replaces the upstream /app/llama-server. Detects host CPU and
+# exec's the matching binary.
+COPY wrapper.sh /app/llama-server
+RUN chmod +x /app/llama-server
 
 # Per-model llama-swap config (set by --build-arg from the workflow).
 # ARG MODEL_CONFIG is the path (relative to build context) to the per-model config.yaml.

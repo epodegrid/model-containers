@@ -11,6 +11,8 @@ README.md
 Dockerfile.ik-llama.in
 go-4/Dockerfile.go-4.in
 
+# wrapper.sh is staged into the ik_llama images, so DO ship it.
+
 # llama.cpp clone (built in CI for ik_llama sharding, then deleted)
 llama.cpp/
 
