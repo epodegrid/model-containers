@@ -7,7 +7,7 @@
 # whatever Azure decides to give us (Milan/Zen3, Genoa/Zen4, or Turin/Zen5).
 #
 # Build flags per ISA:
-#   Zen 3 (Milan):  -march=znver3            (F, CD, BW, DQ; no VL)
+#   Zen 3 (Milan): -march=znver3            (AVX2 only - Zen 3 has NO AVX-512)
 #   Zen 4 (Genoa): -march=znver4            (adds VL)
 #   Zen 5 (Turin): -march=znver4 + Zen5 ISAs (adds VNNI/BF16/VBMI/VBMI2)
 #
@@ -37,13 +37,15 @@ RUN apt-get update \
 RUN git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git /src
 
 # -----------------------------------------------------------------------------
-# Zen 3 (Milan) — AVX-512F/CD/BW/DQ. No VL, no VNNI/BF16/VBMI. Runs on
-# Zen 3 natively; runs in downward-compat mode on Zen 4/5 (small perf cost).
+# Zen 3 (Milan) — AVX2/FMA/BMI2. AMD did not ship AVX-512 until Zen 4
+# (Genoa), so this is the AVX2 fallback path and the binary our target
+# SKU (Azure E48as_v5 = EPYC 7763v Milan) actually runs.
 # HAVE_FANCY_SIMD is NOT defined here (gated on VNNI).
 # -----------------------------------------------------------------------------
 FROM base AS zen3-builder
 WORKDIR /src
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
         -DGGML_NATIVE=OFF \
         -DCMAKE_C_FLAGS="-march=znver3" \
         -DCMAKE_CXX_FLAGS="-march=znver3" \
@@ -61,6 +63,7 @@ RUN mkdir -p /out && cp build/bin/llama-server /out/llama-server.zen3
 FROM base AS zen4-builder
 WORKDIR /src
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
         -DGGML_NATIVE=OFF \
         -DCMAKE_C_FLAGS="-march=znver4" \
         -DCMAKE_CXX_FLAGS="-march=znver4" \
@@ -77,6 +80,7 @@ RUN mkdir -p /out && cp build/bin/llama-server /out/llama-server.zen4
 FROM base AS zen5-builder
 WORKDIR /src
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
         -DGGML_NATIVE=OFF \
         -DCMAKE_C_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2" \
         -DCMAKE_CXX_FLAGS="-march=znver4 -mavx512vnni -mavx512bf16 -mavx512vbmi -mavx512vbmi2" \

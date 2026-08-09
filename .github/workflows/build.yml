@@ -212,106 +212,11 @@ jobs:
       - name: Smoke test (run + hit endpoints)
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ steps.meta.outputs.version }}
+          NAME: ${{ matrix.image_name }}
           HEALTH_PATH: ${{ matrix.smoke_health_path }}
           MODELS_PATH: ${{ matrix.smoke_models_path }}
           HEAVY_PATH: ${{ matrix.smoke_heavy_path }}
           HEAVY_BODY: ${{ matrix.smoke_heavy_body }}
           HEAVY_TIMEOUT: ${{ matrix.smoke_heavy_timeout }}
-        run: |
-          set -e
+        run: ./scripts/smoke-test.sh
 
-          echo "=== Smoke test: $IMAGE ==="
-          # `load: true` on the build step already put this exact image in the
-          # local Docker daemon, so there's no need to pull it back down from
-          # GHCR here. We used to `docker pull` right after pushing, which
-          # re-downloaded every layer over the network for no reason — on the
-          # multi-GB sharded GGUF images that alone ate 4+ minutes and was
-          # eating into the /health wait budget below before the container
-          # had even started.
-
-          # Run container. --network=host so curl on the runner's localhost
-          # reaches the container's port 8080. No -p needed.
-          container_name="smoke-${{ matrix.image_name }}-$$"
-          container_id=$(docker run -d --name "$container_name" --network=host --shm-size=2g "$IMAGE")
-          log_file=/tmp/smoke_container_$$.log
-          docker logs -f "$container_id" > "$log_file" 2>&1 &
-          logs_pid=$!
-          trap "kill $logs_pid 2>/dev/null || true; docker stop $container_id >/dev/null 2>&1 || true; docker rm $container_id >/dev/null 2>&1 || true" EXIT
-
-          echo "Container: $container_id (logs: $log_file)"
-          echo "Smoke config: health=$HEALTH_PATH models=${MODELS_PATH:-<skip>} heavy=$HEAVY_PATH"
-
-          dump_logs() {
-            echo "--- container logs (last 80 lines) ---"
-            tail -80 "$log_file" 2>/dev/null || echo "(no logs captured)"
-          }
-
-          # ---------- /health ----------
-          # curl -sf returns 0 for both 2xx AND 3xx (no -f on 3xx), so the
-          # probe breaks the loop the moment any HTTP response arrives.
-          # If the server returns 302 to / we treat that as 'up' (the server
-          # answered). We verify the right endpoint below.
-          up=0
-          for i in $(seq 1 150); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$HEALTH_PATH" 2>/dev/null)
-            code=${code:-000}
-            if [ "$code" != "000" ]; then
-              echo "  $HEALTH_PATH responded with $code after $((i * 2))s"
-              up=1
-              break
-            fi
-            sleep 2
-          done
-
-          if [ "$up" = "0" ]; then
-            echo "FAIL: $HEALTH_PATH never responded (curl exit non-zero, likely connection refused)"
-            dump_logs
-            exit 1
-          fi
-
-          # Capture the actual body so the log shows what came back.
-          body=$(curl -s "http://localhost:8080$HEALTH_PATH" 2>&1 || true)
-          echo "$HEALTH_PATH body: $body"
-
-          # Verify it's a 2xx, not a redirect. curl -sf doesn't fail on 3xx.
-          if ! echo "$body" | grep -q .; then
-            echo "FAIL: empty body from $HEALTH_PATH"
-            dump_logs
-            exit 1
-          fi
-
-          # ---------- Zen dispatch sanity check (ik_llama only) ----------
-          if grep -q llama-server-wrapper "$log_file" 2>/dev/null; then
-            dispatch=$(grep -m1 llama-server-wrapper "$log_file")
-            echo "Zen dispatch: $dispatch"
-          fi
-
-          # ---------- /v1/models (optional) ----------
-          if [ -n "$MODELS_PATH" ]; then
-            models_code=$(curl -s -o /tmp/smoke_models.txt -w '%{http_code}' "http://localhost:8080$MODELS_PATH" 2>/dev/null)
-            models_code=${models_code:-000}
-            echo "$MODELS_PATH -> HTTP $models_code"
-            if [ "$models_code" != "200" ]; then
-              echo "FAIL: $MODELS_PATH did not return 200"
-              cat /tmp/smoke_models.txt 2>/dev/null || true
-              dump_logs
-              exit 1
-            fi
-            echo "$MODELS_PATH body: $(cat /tmp/smoke_models.txt)"
-          fi
-
-          # ---------- Heavy endpoint (model load + tiny inference) ----------
-          echo "Hitting $HEAVY_PATH (timeout ${HEAVY_TIMEOUT}s)..."
-          if ! curl -sf -X POST "http://localhost:8080$HEAVY_PATH" \
-              -H 'Content-Type: application/json' \
-              -d "$HEAVY_BODY" \
-              --max-time "$HEAVY_TIMEOUT" > /tmp/smoke_heavy.txt; then
-            echo "FAIL: $HEAVY_PATH timed out or errored"
-            dump_logs
-            exit 1
-          fi
-          echo "Heavy response (first 500 bytes):"
-          head -c 500 /tmp/smoke_heavy.txt
-          echo
-
-          echo "=== Smoke test PASSED ==="
