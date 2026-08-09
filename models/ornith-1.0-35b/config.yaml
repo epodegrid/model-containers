@@ -1,5 +1,13 @@
 healthCheckTimeout: 1800
 logLevel: info
+# Send BOTH the proxy's request log and the upstream model's
+# stdout/stderr to the container's stdout. llama-swap defaults to
+# "proxy", which DISCARDS upstream output -- so `kubectl logs`
+# showed only [INFO] Request lines, never llama-server's own output
+# or the wrapper's `[llama-server-wrapper] CPU detected (zenN)`
+# dispatch line. That is what made model crashes surface as a bare
+# "exit status N" with no reason attached.
+logToStdout: both
 metricsMaxInMemory: 1000
 sendLoadingState: true
 includeAliasesInList: true
