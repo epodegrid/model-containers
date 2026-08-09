@@ -224,9 +224,12 @@ jobs:
           docker pull "$IMAGE"
 
           # Run container WITHOUT --rm so a crashed container's logs
-          # remain inspectable. All three images listen on 8080 inside.
+          # remain inspectable. Use --network=host so the smoke test's
+          # curl http://localhost:8080 reaches the container's port 8080
+          # without needing an explicit -p mapping (and avoids the
+          # macOS-style "Connection refused" that hit us once already).
           container_name="smoke-${{ matrix.image_name }}-$$"
-          container_id=$(docker run -d --name "$container_name" --shm-size=2g "$IMAGE")
+          container_id=$(docker run -d --name "$container_name" --network=host --shm-size=2g "$IMAGE")
 
           # Stream container logs to file in background. Survives the
           # container crashing because we're reading from the named
