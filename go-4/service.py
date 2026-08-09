@@ -20,6 +20,7 @@ servers. So we wrap the HuggingFace transformers model directly.
 from __future__ import annotations
 
 import typing as _typing
+from typing import Any, List, Union
 
 import huggingface_hub.dataclasses as _hf_dc
 
@@ -152,27 +153,46 @@ def decode_image(item: dict[str, Any]) -> Image.Image:
 
 
 class EmbeddingRequest(BaseModel):
-    input: str | list[str | dict[str, Any]]
+    # Use Any to avoid Pydantic forward-reference issues with
+    # `str | list[str | dict[str, Any]]` under `from __future__ import annotations`.
+    # Validation happens inside create_embeddings().
+    input: Any
     model: str = "nomic-embed-vision-v1.5"
     encoding_format: str = Field(default="float")
 
 
 class EmbeddingData(BaseModel):
-    embedding: list[float]
+    embedding: List[float]
     index: int
     object: str = "embedding"
 
 
 class EmbeddingResponse(BaseModel):
-    data: list[EmbeddingData]
+    data: List[EmbeddingData]
     model: str
     object: str = "list"
-    usage: dict[str, int]
+    usage: dict
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "model": "nomic-embed-vision-v1.5"}
+
+
+@app.get("/v1/models")
+async def list_models() -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "nomic-embed-vision-v1.5",
+                "object": "model",
+                "created": 0,
+                "owned_by": "nomic-ai",
+                "modalities": ["text", "image"],
+            }
+        ],
+    }
 
 
 @app.post("/v1/embeddings", response_model=EmbeddingResponse)

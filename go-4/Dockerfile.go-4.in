@@ -49,6 +49,8 @@ COPY go-4-snapshot-vision/  /models/nomic-embed-vision-v1.5/
 ENV TEXT_MODEL_PATH=/models/nomic-embed-text-v1.5
 ENV VISION_MODEL_PATH=/models/nomic-embed-vision-v1.5
 
-EXPOSE 8000
+# Use 8080 to match the eve/wall-e images (llama-swap also on 8080) —
+# AKS Services don't have to know which engine is in each pod.
+EXPOSE 8080
 
-CMD ["python", "service.py"]
+CMD ["uvicorn", "service:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -61,7 +61,7 @@ jobs:
             shard: 'false'
             image_tag: latest
             smoke_health_path: /health
-            smoke_models_path: ''
+            smoke_models_path: /v1/models
             smoke_heavy_path: /v1/embeddings
             smoke_heavy_body: '{"model":"nomic-embed-vision-v1.5","input":"smoke test"}'
             smoke_heavy_timeout: 90
