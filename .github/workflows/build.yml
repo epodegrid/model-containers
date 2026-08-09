@@ -36,6 +36,7 @@ jobs:
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
+            smoke_ctx: '4096'
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
@@ -49,6 +50,7 @@ jobs:
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 120
+            smoke_ctx: '4096'
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
@@ -218,5 +220,7 @@ jobs:
           HEAVY_PATH: ${{ matrix.smoke_heavy_path }}
           HEAVY_BODY: ${{ matrix.smoke_heavy_body }}
           HEAVY_TIMEOUT: ${{ matrix.smoke_heavy_timeout }}
+          SMOKE_CTX: ${{ matrix.smoke_ctx }}
+          UPSTREAM_LOGS: '1'
         run: ./scripts/smoke-test.sh
 

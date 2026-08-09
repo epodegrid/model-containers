@@ -18,6 +18,14 @@
 #   PORT           host port to probe (default: 8080)
 #   HEALTH_WAIT    seconds to wait for the server to bind (default: 300)
 #   SKIP_RUN       set to 1 to probe an already-running server (for local tests)
+#   SMOKE_CTX      rewrite --ctx-size in the image's llama-swap config to this
+#                  before running. Production context sizes (131072 for wall-e,
+#                  262144 for eve) need a KV cache far larger than a 16 GB CI
+#                  runner has, so llama-server dies during model load and every
+#                  inference request 502s. Loading the real model at a small
+#                  context still exercises the ISA dispatch, the binary, and the
+#                  GGUF shards — it just doesn't demand prod-sized memory.
+#   UPSTREAM_LOGS  set to 1 to pull llama-swap's /logs on failure (see below)
 
 set -euo pipefail
 
@@ -28,6 +36,8 @@ PORT="${PORT:-8080}"
 HEALTH_WAIT="${HEALTH_WAIT:-300}"
 MODELS_PATH="${MODELS_PATH:-}"
 SKIP_RUN="${SKIP_RUN:-0}"
+SMOKE_CTX="${SMOKE_CTX:-}"
+UPSTREAM_LOGS="${UPSTREAM_LOGS:-0}"
 
 base="http://localhost:${PORT}"
 log_file="$(mktemp -t smoke_container.XXXXXX)"
@@ -44,7 +54,25 @@ if [ "$SKIP_RUN" != "1" ]; then
   #
   # --network=host so curl on the runner's localhost reaches the container's
   # port directly. No --rm, so a crashed container stays inspectable.
-  container_id="$(docker run -d --name "smoke-${NAME}-$$" --network=host --shm-size=2g "$IMAGE")"
+  # Shrink the context if asked, by rewriting the config baked into the image
+  # and mounting the result over it. Done here rather than in the Dockerfile so
+  # the shipped image keeps its production context size.
+  mount_args=""
+  if [ -n "$SMOKE_CTX" ]; then
+    smoke_cfg="$(mktemp -t smoke_config.XXXXXX)"
+    docker run --rm --entrypoint cat "$IMAGE" /app/config.yaml \
+      | sed -E "s/--ctx-size[[:space:]]+[0-9]+/--ctx-size ${SMOKE_CTX}/" > "$smoke_cfg"
+    if ! grep -q -- "--ctx-size ${SMOKE_CTX}" "$smoke_cfg"; then
+      echo "FAIL: could not rewrite --ctx-size to ${SMOKE_CTX} in /app/config.yaml"
+      cat "$smoke_cfg"
+      exit 1
+    fi
+    echo "Context rewritten to ${SMOKE_CTX} for the smoke run: $(grep -- '--ctx-size' "$smoke_cfg" | tr -s ' ')"
+    mount_args="-v $smoke_cfg:/app/config.yaml:ro"
+  fi
+
+  # shellcheck disable=SC2086  # mount_args is intentionally word-split
+  container_id="$(docker run -d --name "smoke-${NAME}-$$" --network=host --shm-size=2g $mount_args "$IMAGE")"
   docker logs -f "$container_id" > "$log_file" 2>&1 &
   logs_pid=$!
   # shellcheck disable=SC2064  # expand ids now, not at trap time
@@ -55,6 +83,16 @@ fi
 dump_logs() {
   echo "--- container logs (last 80 lines) ---"
   tail -80 "$log_file" 2>/dev/null || echo "(no logs captured)"
+
+  # llama-swap does NOT put the spawned model's stdout/stderr on the container's
+  # stdout — it keeps it in a per-model log monitor exposed at /logs. Without
+  # this, a model that fails to load shows up only as an opaque
+  # "exit status N" with no reason, which is exactly what stalled the
+  # earlier 127 and exit-1 investigations.
+  if [ "$UPSTREAM_LOGS" = "1" ]; then
+    echo "--- llama-swap upstream /logs (last 80 lines) ---"
+    curl -s --max-time 10 "${base}/logs" 2>/dev/null | tail -80 || echo "(could not fetch /logs)"
+  fi
 }
 
 # Print an endpoint's HTTP status, or 000 if the connection failed.
