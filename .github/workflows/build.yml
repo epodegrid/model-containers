@@ -253,7 +253,8 @@ jobs:
           # answered). We verify the right endpoint below.
           up=0
           for i in $(seq 1 150); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$HEALTH_PATH" 2>/dev/null || echo "000")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$HEALTH_PATH" 2>/dev/null)
+            code=${code:-000}
             if [ "$code" != "000" ]; then
               echo "  $HEALTH_PATH responded with $code after $((i * 2))s"
               up=1
@@ -287,7 +288,8 @@ jobs:
 
           # ---------- /v1/models (optional) ----------
           if [ -n "$MODELS_PATH" ]; then
-            models_code=$(curl -s -o /tmp/smoke_models.txt -w '%{http_code}' "http://localhost:8080$MODELS_PATH" 2>/dev/null || echo "000")
+            models_code=$(curl -s -o /tmp/smoke_models.txt -w '%{http_code}' "http://localhost:8080$MODELS_PATH" 2>/dev/null)
+            models_code=${models_code:-000}
             echo "$MODELS_PATH -> HTTP $models_code"
             if [ "$models_code" != "200" ]; then
               echo "FAIL: $MODELS_PATH did not return 200"
