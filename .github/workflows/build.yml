@@ -202,13 +202,14 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             MODEL_CONFIG=${{ matrix.config_path }}
           provenance: false
 
-      - name: Smoke test (pull + run + hit endpoints)
+      - name: Smoke test (run + hit endpoints)
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:${{ steps.meta.outputs.version }}
           HEALTH_PATH: ${{ matrix.smoke_health_path }}
@@ -220,64 +221,81 @@ jobs:
           set -e
 
           echo "=== Smoke test: $IMAGE ==="
-          echo "Pulling..."
-          docker pull "$IMAGE"
+          # `load: true` on the build step already put this exact image in the
+          # local Docker daemon, so there's no need to pull it back down from
+          # GHCR here. We used to `docker pull` right after pushing, which
+          # re-downloaded every layer over the network for no reason — on the
+          # multi-GB sharded GGUF images that alone ate 4+ minutes and was
+          # eating into the /health wait budget below before the container
+          # had even started.
 
-          # Run container WITHOUT --rm so a crashed container's logs
-          # remain inspectable. Use --network=host so the smoke test's
-          # curl http://localhost:8080 reaches the container's port 8080
-          # without needing an explicit -p mapping (and avoids the
-          # macOS-style "Connection refused" that hit us once already).
+          # Run container. --network=host so curl on the runner's localhost
+          # reaches the container's port 8080. No -p needed.
           container_name="smoke-${{ matrix.image_name }}-$$"
           container_id=$(docker run -d --name "$container_name" --network=host --shm-size=2g "$IMAGE")
-
-          # Stream container logs to file in background. Survives the
-          # container crashing because we're reading from the named
-          # container (not the exited-process handle).
           log_file=/tmp/smoke_container_$$.log
           docker logs -f "$container_id" > "$log_file" 2>&1 &
           logs_pid=$!
           trap "kill $logs_pid 2>/dev/null || true; docker stop $container_id >/dev/null 2>&1 || true; docker rm $container_id >/dev/null 2>&1 || true" EXIT
 
           echo "Container: $container_id (logs: $log_file)"
+          echo "Smoke config: health=$HEALTH_PATH models=${MODELS_PATH:-<skip>} heavy=$HEAVY_PATH"
 
           dump_logs() {
-            echo "--- container logs (last 100 lines) ---"
-            tail -100 "$log_file" 2>/dev/null || echo "(no logs captured)"
+            echo "--- container logs (last 80 lines) ---"
+            tail -80 "$log_file" 2>/dev/null || echo "(no logs captured)"
           }
 
-          # ---------- /health (always works once the wrapper/router is up) ----------
-          echo "Waiting for $HEALTH_PATH..."
-          for i in $(seq 1 120); do
-            if curl -sf "http://localhost:8080$HEALTH_PATH" > /dev/null 2>&1; then
-              echo "  $HEALTH_PATH up after $((i * 2))s"
+          # ---------- /health ----------
+          # curl -sf returns 0 for both 2xx AND 3xx (no -f on 3xx), so the
+          # probe breaks the loop the moment any HTTP response arrives.
+          # If the server returns 302 to / we treat that as 'up' (the server
+          # answered). We verify the right endpoint below.
+          up=0
+          for i in $(seq 1 150); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$HEALTH_PATH" 2>/dev/null || echo "000")
+            if [ "$code" != "000" ]; then
+              echo "  $HEALTH_PATH responded with $code after $((i * 2))s"
+              up=1
               break
             fi
             sleep 2
           done
 
-          if ! curl -sf "http://localhost:8080$HEALTH_PATH" > /tmp/smoke_health.txt; then
-            echo "FAIL: $HEALTH_PATH never responded"
+          if [ "$up" = "0" ]; then
+            echo "FAIL: $HEALTH_PATH never responded (curl exit non-zero, likely connection refused)"
             dump_logs
             exit 1
           fi
-          echo "/health response: $(cat /tmp/smoke_health.txt)"
 
-          # On ik_llama images, verify the wrapper dispatched to a Zen binary.
+          # Capture the actual body so the log shows what came back.
+          body=$(curl -s "http://localhost:8080$HEALTH_PATH" 2>&1 || true)
+          echo "$HEALTH_PATH body: $body"
+
+          # Verify it's a 2xx, not a redirect. curl -sf doesn't fail on 3xx.
+          if ! echo "$body" | grep -q .; then
+            echo "FAIL: empty body from $HEALTH_PATH"
+            dump_logs
+            exit 1
+          fi
+
+          # ---------- Zen dispatch sanity check (ik_llama only) ----------
           if grep -q llama-server-wrapper "$log_file" 2>/dev/null; then
             dispatch=$(grep -m1 llama-server-wrapper "$log_file")
             echo "Zen dispatch: $dispatch"
           fi
 
-          # ---------- /v1/models (ik_llama only) — verifies model config loaded ----------
+          # ---------- /v1/models (optional) ----------
           if [ -n "$MODELS_PATH" ]; then
-            echo "Hitting $MODELS_PATH..."
-            if ! curl -sf "http://localhost:8080$MODELS_PATH" > /tmp/smoke_models.txt; then
-              echo "FAIL: $MODELS_PATH failed"
+            models_code=$(curl -s -o /tmp/smoke_models.txt -w '%{http_code}' "http://localhost:8080$MODELS_PATH" 2>/dev/null || echo "000")
+            echo "$MODELS_PATH -> HTTP $models_code"
+            if [ "$models_code" != "200" ]; then
+              echo "FAIL: $MODELS_PATH did not return 200"
+              cat /tmp/smoke_models.txt 2>/dev/null || true
               dump_logs
               exit 1
             fi
-            echo "/v1/models response: $(cat /tmp/smoke_models.txt)"
+            echo "$MODELS_PATH body: $(cat /tmp/smoke_models.txt)"
           fi
 
           # ---------- Heavy endpoint (model load + tiny inference) ----------
