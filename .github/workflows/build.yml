@@ -65,9 +65,15 @@ jobs:
             hf_repos: |
               nomic-ai/nomic-embed-text-v1.5
               nomic-ai/nomic-embed-vision-v1.5
+              nomic-ai/nomic-bert-2048
             hf_snapshot_dirs: |
               go-4-snapshot-text
               go-4-snapshot-vision
+              go-4-snapshot-code
+            hf_snapshot_patterns: |
+              *
+              *
+              *.py
             shard: 'false'
             image_tag: latest
             smoke_health_path: /health
@@ -105,6 +111,7 @@ jobs:
           DOWNLOAD_MODE: ${{ matrix.download_mode }}
           HF_REPOS: ${{ matrix.hf_repos }}
           HF_SNAPSHOT_DIRS: ${{ matrix.hf_snapshot_dirs }}
+          HF_SNAPSHOT_PATTERNS: ${{ matrix.hf_snapshot_patterns }}
         run: |
           python - <<'PY'
           import os
@@ -127,9 +134,21 @@ jobs:
               dirs  = [d.strip() for d in os.environ.get("HF_SNAPSHOT_DIRS", "").splitlines() if d.strip()]
               if len(repos) != len(dirs):
                   raise SystemExit(f"HF_REPOS and HF_SNAPSHOT_DIRS length mismatch: {len(repos)} vs {len(dirs)}")
-              for repo, dest in zip(repos, dirs):
-                  path = snapshot_download(repo_id=repo, local_dir=dest, token=token)
-                  print(f"Downloaded {repo} to:", path)
+
+              # Optional per-repo allow-patterns, one line per repo, comma
+              # separated. "*" (or an absent list) means the whole repo. This
+              # exists so the nomic-bert-2048 code repo can contribute just its
+              # two .py files instead of ~1 GB of weights we never load.
+              raw_patterns = [p.strip() for p in os.environ.get("HF_SNAPSHOT_PATTERNS", "").splitlines() if p.strip()]
+              if raw_patterns and len(raw_patterns) != len(repos):
+                  raise SystemExit(f"HF_SNAPSHOT_PATTERNS length mismatch: {len(raw_patterns)} vs {len(repos)}")
+              if not raw_patterns:
+                  raw_patterns = ["*"] * len(repos)
+
+              for repo, dest, pattern in zip(repos, dirs, raw_patterns):
+                  allow = None if pattern == "*" else [p.strip() for p in pattern.split(",")]
+                  path = snapshot_download(repo_id=repo, local_dir=dest, token=token, allow_patterns=allow)
+                  print(f"Downloaded {repo} ({pattern}) to:", path)
           else:
               raise SystemExit(f"unknown download mode: {mode}")
           PY

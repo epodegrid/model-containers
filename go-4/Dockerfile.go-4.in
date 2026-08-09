@@ -46,8 +46,31 @@ COPY go-4/service.py /app/service.py
 COPY go-4-snapshot-text/    /models/nomic-embed-text-v1.5/
 COPY go-4-snapshot-vision/  /models/nomic-embed-vision-v1.5/
 
+# Both model repos declare their code in a THIRD repo via auto_map's cross-repo
+# syntax ("nomic-ai/nomic-bert-2048--modeling_hf_nomic_bert.NomicBertModel").
+# Shipping only the model snapshots means the first trust_remote_code load
+# still calls out to huggingface.co, which crashloops in an air-gapped
+# cluster. Copy those modules next to each config.json and strip the
+# "<repo>--" prefix so the classes resolve locally, with no network and no HF
+# cache to keep in sync. HF_SNAPSHOT_PATTERNS limits this repo to *.py, so it
+# costs ~105 KB rather than the ~1 GB of weights we never load.
+COPY go-4-snapshot-code/    /tmp/nomic-code/
+COPY go-4/vendor_remote_code.py /tmp/vendor_remote_code.py
+RUN python /tmp/vendor_remote_code.py /tmp/nomic-code \
+        /models/nomic-embed-text-v1.5 \
+        /models/nomic-embed-vision-v1.5 \
+    && rm -rf /tmp/nomic-code /tmp/vendor_remote_code.py
+
 ENV TEXT_MODEL_PATH=/models/nomic-embed-text-v1.5
 ENV VISION_MODEL_PATH=/models/nomic-embed-vision-v1.5
+
+# Everything the service needs is baked in, so forbid Hub access outright.
+# In an air-gapped cluster the request would fail anyway — failing fast and
+# locally beats a connection timeout on every pod start, and it turns any
+# future "this quietly downloads something" regression into a build-time
+# failure instead of a production crashloop.
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 # Use 8080 to match the eve/wall-e images (llama-swap also on 8080) —
 # AKS Services don't have to know which engine is in each pod.
