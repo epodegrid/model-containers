@@ -42,7 +42,10 @@ jobs:
             smoke_health_path: /health
             smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
-            smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
+            # "eve" is the IMAGE name; the llama-swap model id in
+            # models/ornith-1.0-35b/config.yaml is "ornith". Asking for "eve"
+            # returns 400 "could not find suitable inference handler".
+            smoke_heavy_body: '{"model":"ornith","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
             # ~21 GB of Ornith-35B shards. Exporting a third copy into the
