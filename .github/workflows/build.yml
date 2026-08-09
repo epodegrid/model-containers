@@ -11,6 +11,14 @@ on:
       - 'models/**'
       - '.github/workflows/build.yml'
 
+# One in-flight run per branch. Each push starts three jobs, two of which
+# compile ik_llama.cpp for three ISAs (~40 min each), so a superseded run
+# left to finish is a lot of wasted runner time. Cancel it the moment a
+# newer commit lands on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
@@ -198,6 +206,9 @@ jobs:
             type=sha,format=short,prefix=
             type=raw,value=${{ matrix.image_tag }},enable={{is_default_branch}}
 
+      - name: Disk before build
+        run: df -h / | tail -1
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -210,6 +221,21 @@ jobs:
           build-args: |
             MODEL_CONFIG=${{ matrix.config_path }}
           provenance: false
+
+      # `load: true` exports the finished image into the Docker daemon so the
+      # smoke test can run it without re-pulling from GHCR. That leaves TWO
+      # copies on disk: buildkit's cache and the daemon's. For eve (~21 GB of
+      # Ornith-35B shards, vs ~7 GB for wall-e) that is enough to fill the
+      # runner — the job died mid-build at 39 min with its log blob missing,
+      # the signature of a runner killed rather than a step erroring out.
+      # The image is pushed and loaded by now, so buildkit's cache is dead
+      # weight. Drop it before starting the container.
+      - name: Reclaim disk before smoke test
+        run: |
+          echo "before prune:"; df -h / | tail -1
+          docker buildx prune --all --force >/dev/null 2>&1 || true
+          rm -f ./*.gguf || true
+          echo "after prune:";  df -h / | tail -1
 
       - name: Smoke test (run + hit endpoints)
         env:
