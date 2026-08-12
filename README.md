@@ -79,6 +79,31 @@ curl -s http://localhost:9294/v1/embeddings \
   -d '{"model":"nomic-embed-vision-v1.5","input":"hello world"}'
 ```
 
+### Memory per replica
+
+Most of a replica's memory is the KV cache, not the weights. llama.cpp
+commits the whole cache for `--ctx-size` at load time, used or not, so the
+figure below is what each pod holds the moment it finishes loading — and it
+multiplies by every replica KEDA adds.
+
+Both images run the full native 256K context with a **q8_0 KV cache**
+(`-ctk q8_0 -ctv q8_0`), which halves the cache for negligible quality cost.
+That is only legal alongside `-fa on`: ik_llama refuses a quantized V cache
+without flash attention.
+
+| | weights | KV @262144 (q8_0) | total |
+|---|---|---|---|
+| `wall-e` (Ornith-9B Q8_0)  |  9.5 GB | 17.2 GB | **26.7 GB** |
+| `eve` (Ornith-35B Q5_K_M)  | 24.7 GB | 10.7 GB | **35.5 GB** |
+
+Counterintuitively the 9B holds the *larger* cache: 4 KV heads against the
+35B's 2, so at equal context it costs twice per token. With an f16 cache
+these would be 43.9 GB and 46.2 GB — halving the cache is where the win is,
+not the quantisation of the weights.
+
+Drop `--ctx-size` if you need more replicas per node; the cache scales
+linearly with it.
+
 ### Reasoning
 
 Both ik_llama images serve reasoning models and are built for it: the config

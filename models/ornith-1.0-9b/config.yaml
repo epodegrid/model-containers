@@ -28,6 +28,7 @@ models:
       --jinja
       --ctx-size 262144
       -fa on
+      -ctk q8_0 -ctv q8_0
       --reasoning on
       --reasoning-format deepseek
       --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
