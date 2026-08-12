@@ -27,8 +27,8 @@ go-4-snapshot-vision
 go-4-snapshot-vision/**
 
 # Re-include sharded GGUFs (eve + wall-e)
-!ornith-1.0-35b-Q4_K_M-*.gguf
-!gemma-4-12b-it-qat-q4_0-*.gguf
+!ornith-1.0-35b-Q5_K_M-*.gguf
+!ornith-1.0-9b-Q8_0-*.gguf
 
 # Re-include go-4 snapshots
 !go-4-snapshot-text

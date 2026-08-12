@@ -14,14 +14,14 @@ includeAliasesInList: true
 
 models:
   # The model id is the IMAGE name, so callers address the container they
-  # deployed rather than whatever weights happen to be inside it. "ornith"
-  # stays as an alias, so anything already calling it keeps working.
-  "eve":
+  # deployed rather than whatever weights happen to be inside it. The real
+  # model name stays available as an alias.
+  "wall-e":
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/ornith-1.0-35b-Q5_K_M-00001-of-00005.gguf
-      --alias eve
+      --model /models/ornith-1.0-9b-Q8_0-00001-of-00002.gguf
+      --alias wall-e
       --port 9999
       --parallel 1
       --webui llamacpp
@@ -32,10 +32,10 @@ models:
       --reasoning-format deepseek
       --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
     aliases:
-      - "eve"
-      - "ornith"
-      - "Ornith-1.0-35B"
-      - "deepreinforce-ai/Ornith-1.0-35B"
+      - "wall-e"
+      - "ornith-9b"
+      - "Ornith-1.0-9B"
+      - "ornith-ai/Ornith-1.0-9B"
     filters:
       setParamsByID:
         # Agentic/coding work. The model card reports SWE-Bench Verified/Pro

@@ -35,17 +35,22 @@ jobs:
             dockerfile_template: Dockerfile.ik-llama.in
             config_path: models/ornith-1.0-35b/config.yaml
             download_mode: single
-            hf_repo: deepreinforce-ai/Ornith-1.0-35B-GGUF
-            hf_filename: ornith-1.0-35b-Q4_K_M.gguf
+            # deepreinforce-ai/* is a 307 redirect to ornith-ai/*; use the
+            # canonical org directly.
+            hf_repo: ornith-ai/Ornith-1.0-35B-GGUF
+            # Q5_K_M (24.73 GB). Q8_0 is 36.90 GB, which overflows the runner
+            # during the build (~74 GB needed against ~69 GB free after
+            # sharding) and, being memory-bandwidth bound, would run at ~0.57x
+            # these tokens/sec. Q6_K fits but costs ~15% throughput over
+            # Q5_K_M for a smaller quality step than Q4->Q5 -- and with
+            # reasoning on, output length is what dominates latency.
+            hf_filename: ornith-1.0-35b-Q5_K_M.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
             smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
-            # "eve" is the IMAGE name; the llama-swap model id in
-            # models/ornith-1.0-35b/config.yaml is "ornith". Asking for "eve"
-            # returns 400 "could not find suitable inference handler".
-            smoke_heavy_body: '{"model":"ornith","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
+            smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
             # ~21 GB of Ornith-35B shards. Exporting a third copy into the
@@ -55,10 +60,15 @@ jobs:
             build_load: 'false'
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/gemma-4-12b-it-qat-q4_0/config.yaml
+            config_path: models/ornith-1.0-9b/config.yaml
             download_mode: single
-            hf_repo: google/gemma-4-12b-it-qat-q4_0-gguf
-            hf_filename: gemma-4-12b-it-qat-q4_0.gguf
+            hf_repo: ornith-ai/Ornith-1.0-9B-GGUF
+            # Q8_0 (9.53 GB): effectively lossless against bf16 at roughly half
+            # the memory traffic. CPU inference here is bandwidth-bound, so the
+            # 17.92 GB bf16 would run at about half the tokens/sec for no
+            # perceptible quality gain -- and Zen 3 has no AVX512-BF16, so it
+            # would also pay a software bf16->fp32 conversion per row.
+            hf_filename: ornith-1.0-9b-Q8_0.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
@@ -188,6 +198,32 @@ jobs:
       - name: Cleanup llama.cpp source
         if: matrix.shard == 'true'
         run: rm -rf llama.cpp
+
+      # The config has to name the FIRST shard, whose filename embeds the
+      # total count (-00001-of-00005). That count depends on the model's size
+      # against --split-max-size, so hardcoding it in config.yaml is a guess
+      # that only fails after a ~40 minute build. Rewrite it from the shards
+      # that actually exist instead.
+      - name: Point the config at the first shard actually produced
+        if: matrix.shard == 'true'
+        env:
+          HF_FILENAME: ${{ matrix.hf_filename }}
+          CONFIG_PATH: ${{ matrix.config_path }}
+        run: |
+          set -euo pipefail
+          base="${HF_FILENAME%.gguf}"
+          first=$(ls "$base"-*-of-*.gguf 2>/dev/null | sort | head -1)
+          if [ -z "$first" ]; then
+            echo "FAIL: sharding produced no $base-*-of-*.gguf files"; ls -la ./*.gguf || true; exit 1
+          fi
+          echo "First shard: $first"
+          before=$(grep -c -- "--model /models/" "$CONFIG_PATH" || true)
+          if [ "$before" != "1" ]; then
+            echo "FAIL: expected exactly one --model line in $CONFIG_PATH, found $before"; exit 1
+          fi
+          sed -i -E "s|--model /models/[^[:space:]]+\.gguf|--model /models/$first|" "$CONFIG_PATH"
+          echo "--- effective model line ---"
+          grep -- "--model /models/" "$CONFIG_PATH"
 
       - name: Generate Dockerfile (append COPYs for ik_llama sharded entries)
         if: matrix.shard == 'true'

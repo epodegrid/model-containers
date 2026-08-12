@@ -9,8 +9,8 @@ driver DaemonSets anyway).
 
 | Image | Engine | Model(s) | Hardware |
 |---|---|---|---|
-| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `deepreinforce-ai/Ornith-1.0-35B`        | any amd64 with AVX-512 (Zen 3/4/5) |
-| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `google/gemma-4-12b-it-qat-q4_0`        | any amd64 with AVX-512 (Zen 3/4/5) |
+| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.0-35B` (Q5_K_M) | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.0-9B` (Q8_0)    | any amd64 with AVX2 (Zen 3+) |
 | `ghcr.io/epodegrid/go-4:latest`   | Python (FastAPI + transformers)   | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | any amd64 |
 
 Both ik_llama images ship **three compiled llama-server binaries** inside
@@ -58,7 +58,7 @@ docker run --rm -p 9292:8080 ghcr.io/epodegrid/eve:latest
 # Watch the wrapper dispatch: `kubectl logs` will show
 # `[llama-server-wrapper] CPU detected (zenN), exec'ing /app/llama-server.zenN`
 
-# wall-e — Gemma 4 12B
+# wall-e — Ornith 1.0 9B
 docker pull ghcr.io/epodegrid/wall-e:latest
 docker run --rm -p 9293:8080 ghcr.io/epodegrid/wall-e:latest
 
@@ -79,17 +79,38 @@ curl -s http://localhost:9294/v1/embeddings \
   -d '{"model":"nomic-embed-vision-v1.5","input":"hello world"}'
 ```
 
+### Reasoning
+
+Both ik_llama images serve reasoning models and are built for it: the config
+passes `--reasoning on --reasoning-format deepseek`, so the assistant's
+`<think> … </think>` trace comes back in a separate **`reasoning_content`**
+field rather than inline in `content`. Nothing has to be enabled per request.
+
+```jsonc
+{"choices":[{"message":{"role":"assistant",
+  "reasoning_content":"...the chain of thought...",
+  "content":"...the answer..."}}]}
+```
+
+Bare ids (`eve`, `wall-e`) leave sampling to the caller. The suffixed ids are
+**enforced presets**: llama-swap overwrites those parameters on the way
+through, so a `temperature` sent to `eve:instruct` is replaced, not merged.
+Send to the bare id when the caller needs control.
+
+`:instruct` turns thinking off via `enable_thinking=false`, which is the one
+way to get a non-reasoning reply.
+
 ### Model IDs / aliases
 
 **eve** (llama-swap routing):
-- `eve`, `Ornith-1.0-35B`, `deepreinforce-ai/Ornith-1.0-35B`
-  - `eve:thinking-coding` — explicit thinking-mode sampling
+- `eve`, `ornith`, `Ornith-1.0-35B`, `deepreinforce-ai/Ornith-1.0-35B`
+  - `eve:thinking-coding` — agentic/coding sampler (temp 1.0, top_p 0.95)
   - `eve:instruct`        — non-thinking mode (enable_thinking=false)
 
 **wall-e** (llama-swap routing):
-- `wall-e`, `gemma-4-12b`, `google/gemma-4-12b-it-qat-q4_0`
-  - `wall-e:coding`   — coding-mode sampler (temp 0.6)
-  - `wall-e:instruct` — non-thinking mode
+- `wall-e`, `ornith-9b`, `Ornith-1.0-9B`, `ornith-ai/Ornith-1.0-9B`
+  - `wall-e:thinking-coding` — agentic/coding sampler (temp 1.0, top_p 0.95)
+  - `wall-e:instruct`        — non-thinking mode (enable_thinking=false)
 
 **go-4** (single FastAPI app, no swap):
 - `nomic-embed-vision-v1.5` — accepts mixed text + image inputs in `/v1/embeddings`
