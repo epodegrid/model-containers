@@ -9,8 +9,8 @@ driver DaemonSets anyway).
 
 | Image | Engine | Model(s) | Hardware |
 |---|---|---|---|
-| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.5-35B-A3B` (Q6_K) | any amd64 with AVX2 (Zen 3+) |
-| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `Qwen/Qwen3.8-27B` (Q8_0)             | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.5-35B-A3B` (Q5_K_M) | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `Qwen/Qwen3.8-27B` (UD-Q6_K_L)        | any amd64 with AVX2 (Zen 3+) |
 | `ghcr.io/epodegrid/go-4:latest`   | Python (FastAPI + transformers)   | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | any amd64 |
 
 Both ik_llama images ship **three compiled llama-server binaries** inside
@@ -102,8 +102,8 @@ the dense Ornith 1.0 pair they replace.
 
 | | full-attn layers | weights | KV @262144 (q8_0) | total |
 |---|---|---|---|---|
-| `eve` (Ornith-1.5-35B-A3B Q6_K) | 10 of 40 | 29.2 GB | 2.9 GB | **32.1 GB** |
-| `wall-e` (Qwen3.8-27B Q8_0)     | 16 of 64 | 29.1 GB | 9.1 GB | **38.3 GB** |
+| `eve` (Ornith-1.5-35B-A3B Q5_K_M) | 10 of 40 | 25.4 GB | 2.9 GB | **28.3 GB** |
+| `wall-e` (Qwen3.8-27B UD-Q6_K_L) | 16 of 64 | 24.2 GB | 9.1 GB | **33.4 GB** |
 
 wall-e still holds the larger cache — 16 full-attention layers at 4 KV heads
 against eve's 10 at 2 — so at equal context it costs about 3.2× per token. With
@@ -112,11 +112,11 @@ an f16 cache these would be 34.6 GB and 46.2 GB.
 The headline change from Ornith 1.0 is that **weights now dominate, not cache**.
 The old pair spent 17.2 GB (wall-e) and 10.7 GB (eve) on KV; the hybrid layers
 cut that to 9.1 and 2.9 while the weights roughly tripled on wall-e. Net per
-replica: eve drops 35.5 → 32.1 GB, wall-e rises 26.7 → 38.3 GB.
+replica: eve drops 35.5 → 28.3 GB, wall-e rises 26.7 → 33.4 GB.
 
 Because the cache is now a small fraction of the total, **dropping `--ctx-size`
 buys far less than it used to** — cutting eve to 64K reclaims ~2.1 GB against a
-32.1 GB replica. If you need more replicas per node, a smaller quant is now the
+28.3 GB replica. If you need more replicas per node, a smaller quant is now the
 lever, not a shorter context.
 
 ### Reasoning

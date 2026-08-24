@@ -20,7 +20,7 @@ models:
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/Qwen3.8-27B-Q8_0-00001-of-00006.gguf
+      --model /models/Qwen3.8-27B-UD-Q6_K_L-00001-of-00005.gguf
       --alias wall-e
       --port 9999
       --parallel 1

@@ -20,7 +20,7 @@ models:
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/Ornith-1.5-35B-Q6_K-00001-of-00006.gguf
+      --model /models/Ornith-1.5-35B-Q5_K_M-00001-of-00006.gguf
       --alias eve
       --port 9999
       --parallel 1

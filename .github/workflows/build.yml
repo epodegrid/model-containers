@@ -36,16 +36,25 @@ jobs:
             config_path: models/ornith-1.5-35b-a3b/config.yaml
             download_mode: single
             hf_repo: ornith-ai/Ornith-1.5-35B-A3B-GGUF
-            # Q6_K (29.21 GB) -- the largest quant that still builds. Q8_0 is
-            # 37.80 GB and needs ~76 GB against ~69 GB free after sharding,
-            # the same overflow that ruled out 1.0's Q8_0 at 36.90 GB.
+            # Q5_K_M (25.35 GB). Q6_K (29.21 GB) was tried and WEDGED the
+            # runner: buildkit filled the disk and the job hung until it was
+            # cancelled at ~90 min, having pushed nothing.
             #
-            # 1.0 could not afford Q6_K: as a DENSE 35B it read every weight
-            # per token, so the ~15% bandwidth cost over Q5_K_M came straight
-            # off tokens/sec. 1.5 is a 256-expert MoE activating 8 (~3B of
-            # ~35B params), so per-token bandwidth is a fraction of the file
-            # and the quant step is close to free. Spend it on quality.
-            hf_filename: Ornith-1.5-35B-Q6_K.gguf
+            # The real budget, measured rather than assumed: the runner is
+            # 145 GB with ~110 GB free after the cleanup step, and a 29 GB
+            # GGUF consumes ALL of it -- wall-e's Q8_0 (29.05 GB) finished
+            # its build with 54 MB left, at 100% full. Peak is ~3.8x the
+            # GGUF, not the ~2x an earlier comment here claimed: shards on
+            # disk + buildkit's uncompressed layer store + the compressed
+            # push blobs (GGUF barely compresses) + three ISA build caches.
+            # So the ceiling is ~29 GB and Q6_K sits ON it, not inside it;
+            # 160 MB more than wall-e was enough to go over.
+            #
+            # Q5_K_M leaves ~15 GB of real margin and is the same footprint
+            # class as the 1.0 builds that succeeded repeatedly. Cost is low
+            # here anyway: 1.5 is a 256-expert MoE activating 8 (~3B of ~35B),
+            # so per-token bandwidth is a fraction of the file either way.
+            hf_filename: Ornith-1.5-35B-Q5_K_M.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
@@ -54,7 +63,7 @@ jobs:
             smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
-            # ~29 GB of Ornith-1.5 shards. Exporting a third copy into the
+            # ~25 GB of Ornith-1.5 shards. Exporting a third copy into the
             # Docker daemon (build context + buildkit layers + daemon) fills
             # even a 145 GB runner: "No space left on device". Pull it back
             # after the build instead, once the cache and shards are freed.
@@ -64,18 +73,23 @@ jobs:
             config_path: models/qwen3.8-27b/config.yaml
             download_mode: single
             hf_repo: unsloth/Qwen3.8-27B-GGUF
-            # Q8_0 (29.05 GB): the largest usable quant in the repo. The only
-            # non-BF16 file above it is UD-Q8_K_XL (31.46 GB), and Unsloth's
-            # UD-*_XL dynamic quants are excluded here as unsupported by
-            # ik_llama.cpp -- so Q8_0 is the ceiling on quality regardless of
-            # what disk allows. It is also the safest pick: no imatrix, no
-            # dynamic per-tensor promotion, just straight 8-bit.
+            # UD-Q6_K_L (24.19 GB). Q8_0 (29.05 GB) built once and pushed,
+            # but only just: it finished with 54 MB free on a 145 GB disk,
+            # 100% full. See eve's note above for the measured budget -- peak
+            # is ~3.8x the GGUF against ~110 GB free, so 29 GB sits ON the
+            # ceiling. eve's Q6_K, 160 MB larger, wedged the runner outright.
+            # A build that wins by 54 MB is luck, not headroom: any growth in
+            # the base image, the runner image or ik_llama tips it over.
+            #
+            # UD-Q6_K_L keeps Q6-class quality with ~18 GB of real margin.
+            # Not an _XL dynamic quant, so it stays inside what ik_llama can
+            # load. Also drops the replica from 38.3 to 33.4 GB.
             #
             # wall-e is no longer the "small" image. It was a 9B at 9.53 GB;
             # the image is dominated by the three ik_llama binaries and the
             # base layer either way, so the slot now carries a second fully
             # competent model rather than a cheap one.
-            hf_filename: Qwen3.8-27B-Q8_0.gguf
+            hf_filename: Qwen3.8-27B-UD-Q6_K_L.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
