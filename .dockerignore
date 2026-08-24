@@ -26,9 +26,12 @@ go-4-snapshot-text/**
 go-4-snapshot-vision
 go-4-snapshot-vision/**
 
-# Re-include sharded GGUFs (eve + wall-e)
-!ornith-1.0-35b-Q5_K_M-*.gguf
-!ornith-1.0-9b-Q8_0-*.gguf
+# Re-include sharded GGUFs (eve + wall-e). These must match the HF filenames
+# exactly, case included -- Docker's patterns are case-sensitive on Linux, and
+# a near-miss here silently drops every shard from the build context instead of
+# erroring, producing an image that only fails at model load.
+!Ornith-1.5-35B-Q6_K-*.gguf
+!Qwen3.8-27B-Q8_0-*.gguf
 
 # Re-include go-4 snapshots
 !go-4-snapshot-text

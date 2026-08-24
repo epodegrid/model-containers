@@ -9,8 +9,8 @@ driver DaemonSets anyway).
 
 | Image | Engine | Model(s) | Hardware |
 |---|---|---|---|
-| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.0-35B` (Q5_K_M) | any amd64 with AVX2 (Zen 3+) |
-| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.0-9B` (Q8_0)    | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.5-35B-A3B` (Q6_K) | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `Qwen/Qwen3.8-27B` (Q8_0)             | any amd64 with AVX2 (Zen 3+) |
 | `ghcr.io/epodegrid/go-4:latest`   | Python (FastAPI + transformers)   | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | any amd64 |
 
 Both ik_llama images ship **three compiled llama-server binaries** inside
@@ -51,14 +51,14 @@ the host can actually run.
 ## Local quick-start
 
 ```bash
-# eve — Ornith
+# eve — Ornith 1.5 35B-A3B (MoE)
 docker pull ghcr.io/epodegrid/eve:latest
 docker run --rm -p 9292:8080 ghcr.io/epodegrid/eve:latest
 # First request takes ~30-60s while llama-server loads the model.
 # Watch the wrapper dispatch: `kubectl logs` will show
 # `[llama-server-wrapper] CPU detected (zenN), exec'ing /app/llama-server.zenN`
 
-# wall-e — Ornith 1.0 9B
+# wall-e — Qwen3.8 27B
 docker pull ghcr.io/epodegrid/wall-e:latest
 docker run --rm -p 9293:8080 ghcr.io/epodegrid/wall-e:latest
 
@@ -81,28 +81,43 @@ curl -s http://localhost:9294/v1/embeddings \
 
 ### Memory per replica
 
-Most of a replica's memory is the KV cache, not the weights. llama.cpp
-commits the whole cache for `--ctx-size` at load time, used or not, so the
-figure below is what each pod holds the moment it finishes loading — and it
-multiplies by every replica KEDA adds.
+llama.cpp commits the whole cache for `--ctx-size` at load time, used or not,
+so the figure below is what each pod holds the moment it finishes loading — and
+it multiplies by every replica KEDA adds. (Under Ornith 1.0 the cache was the
+larger half of that figure; with the hybrid models below it no longer is — see
+the note after the table.)
 
 Both images run the full native 256K context with a **q8_0 KV cache**
 (`-ctk q8_0 -ctv q8_0`), which halves the cache for negligible quality cost.
 That is only legal alongside `-fa on`: ik_llama refuses a quantized V cache
 without flash attention.
 
-| | weights | KV @262144 (q8_0) | total |
-|---|---|---|---|
-| `wall-e` (Ornith-9B Q8_0)  |  9.5 GB | 17.2 GB | **26.7 GB** |
-| `eve` (Ornith-35B Q5_K_M)  | 24.7 GB | 10.7 GB | **35.5 GB** |
+Both models are **Qwen3.5 hybrid-attention** architectures: `layer_types`
+alternates three `linear_attention` layers with one `full_attention` layer
+(`full_attention_interval: 4`). Only the full-attention layers hold a KV cache
+that grows with context. The linear-attention layers carry a fixed-size
+recurrent state instead — 63 MB for eve, 151 MB for wall-e, *independent of
+`--ctx-size`* — which is why the cache figures below are so much smaller than
+the dense Ornith 1.0 pair they replace.
 
-Counterintuitively the 9B holds the *larger* cache: 4 KV heads against the
-35B's 2, so at equal context it costs twice per token. With an f16 cache
-these would be 43.9 GB and 46.2 GB — halving the cache is where the win is,
-not the quantisation of the weights.
+| | full-attn layers | weights | KV @262144 (q8_0) | total |
+|---|---|---|---|---|
+| `eve` (Ornith-1.5-35B-A3B Q6_K) | 10 of 40 | 29.2 GB | 2.9 GB | **32.1 GB** |
+| `wall-e` (Qwen3.8-27B Q8_0)     | 16 of 64 | 29.1 GB | 9.1 GB | **38.3 GB** |
 
-Drop `--ctx-size` if you need more replicas per node; the cache scales
-linearly with it.
+wall-e still holds the larger cache — 16 full-attention layers at 4 KV heads
+against eve's 10 at 2 — so at equal context it costs about 3.2× per token. With
+an f16 cache these would be 34.6 GB and 46.2 GB.
+
+The headline change from Ornith 1.0 is that **weights now dominate, not cache**.
+The old pair spent 17.2 GB (wall-e) and 10.7 GB (eve) on KV; the hybrid layers
+cut that to 9.1 and 2.9 while the weights roughly tripled on wall-e. Net per
+replica: eve drops 35.5 → 32.1 GB, wall-e rises 26.7 → 38.3 GB.
+
+Because the cache is now a small fraction of the total, **dropping `--ctx-size`
+buys far less than it used to** — cutting eve to 64K reclaims ~2.1 GB against a
+32.1 GB replica. If you need more replicas per node, a smaller quant is now the
+lever, not a shorter context.
 
 ### Reasoning
 
@@ -128,14 +143,22 @@ way to get a non-reasoning reply.
 ### Model IDs / aliases
 
 **eve** (llama-swap routing):
-- `eve`, `ornith`, `Ornith-1.0-35B`, `deepreinforce-ai/Ornith-1.0-35B`
+- `eve`, `ornith`, `Ornith-1.5-35B-A3B`, `ornith-ai/Ornith-1.5-35B-A3B`
   - `eve:thinking-coding` — agentic/coding sampler (temp 1.0, top_p 0.95)
   - `eve:instruct`        — non-thinking mode (enable_thinking=false)
 
 **wall-e** (llama-swap routing):
-- `wall-e`, `ornith-9b`, `Ornith-1.0-9B`, `ornith-ai/Ornith-1.0-9B`
-  - `wall-e:thinking-coding` — agentic/coding sampler (temp 1.0, top_p 0.95)
-  - `wall-e:instruct`        — non-thinking mode (enable_thinking=false)
+- `wall-e`, `qwen`, `Qwen3.8-27B`, `Qwen/Qwen3.8-27B`
+  - `wall-e:thinking-coding`  — agentic/coding sampler (temp 1.0, top_p 0.95)
+  - `wall-e:instruct`         — non-thinking mode (enable_thinking=false,
+    plus the card's instruct sampler: temp 0.7, top_p 0.8, **presence_penalty 1.5**)
+  - `wall-e:thinking-medium`  — `reasoning_effort=medium`
+  - `wall-e:thinking-low`     — `reasoning_effort=low`
+
+Only Qwen3.8 has `reasoning_effort`, so the two depth presets exist on wall-e
+alone. Note the ids are unchanged (`eve`, `wall-e`) — callers pinned to the
+image name keep working across this swap; only `ornith-9b` / `Ornith-1.0-*`
+went away with the weights they named.
 
 **go-4** (single FastAPI app, no swap):
 - `nomic-embed-vision-v1.5` — accepts mixed text + image inputs in `/v1/embeddings`
@@ -196,10 +219,24 @@ single `-march=znver5`.
   tok/s single-stream at Q4 on Genoa with ik_llama, possibly 30-60 tok/s
   with MTP. We need an actual `llama-bench` run on the E48as_v5 node to
   confirm the dispatch is picking the right binary and that HAVE_FANCY_SIMD
-  is firing on Zen 5 silicon.
-- **No published Ornith MTP GGUF found.** MTP (1.4-2.2x lever) would
-  roughly double throughput headroom toward the 40-50 tok/s commercial
-  median. If deepreinforce-ai publishes one, just swap the matrix entry.
+  is firing on Zen 5 silicon. This matters more after the model swap, not
+  less: both images changed architecture family *and* roughly tripled
+  (wall-e) or held (eve) their weight footprint.
+- **MTP weights now exist but are NOT wired up.** This was previously blocked
+  on nothing being published. Both new models ship MTP: `Ornith-1.5-35B-A3B`
+  sets `mtp_num_hidden_layers: 1`, and the Unsloth Qwen3.8 repo ships a
+  separate `MTP/mtp-Qwen3.8-27B-Q4_0.gguf` (1.37 GB). Neither is downloaded or
+  passed to llama-server today, so the 1.4-2.2x lever is still unclaimed —
+  it now needs a draft-model wiring decision, not an upstream release.
+- **eve is now an MoE; the throughput estimates above are stale.** The
+  ~20-40 tok/s figure was measured against a *dense* 35B. Ornith 1.5 activates
+  8 of 256 experts (~3B of ~35B params), so per-token memory traffic is a
+  fraction of the 29.2 GB file. That should be a large speedup on a
+  bandwidth-bound CPU path, but it is unmeasured — see the benchmark item above.
+- **Both new models are vision-capable; both are served text-only.** Each repo
+  publishes an `mmproj` file (~0.9 GB) that we do not download or mount, so
+  `/v1/chat/completions` accepts text only. Adding it is a deliberate scope
+  decision, not an oversight.
 - **Zen 3 lacks VNNI.** So `HAVE_FANCY_SIMD` is **NOT** defined on the
   `zen3` build — the AVX-512 base path, not the IQK VNNI kernels. Zen 4
   uses 256-bit double-pumped AVX-512 (~30-50% faster than AVX2); Zen 5

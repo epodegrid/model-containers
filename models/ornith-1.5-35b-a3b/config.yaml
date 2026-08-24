@@ -20,7 +20,7 @@ models:
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/ornith-1.0-35b-Q5_K_M-00001-of-00005.gguf
+      --model /models/Ornith-1.5-35B-Q6_K-00001-of-00006.gguf
       --alias eve
       --port 9999
       --parallel 1
@@ -35,20 +35,20 @@ models:
     aliases:
       - "eve"
       - "ornith"
-      - "Ornith-1.0-35B"
-      - "deepreinforce-ai/Ornith-1.0-35B"
+      - "Ornith-1.5-35B-A3B"
+      - "ornith-ai/Ornith-1.5-35B-A3B"
     filters:
       setParamsByID:
-        # Agentic/coding work. The model card reports SWE-Bench Verified/Pro
-        # and SWE Atlas at temperature=1.0, top_p=0.95 -- higher than the
-        # general recommendation, and these are the numbers the published
-        # coding scores were actually produced with.
+        # Agentic/coding work. The card reports SWE-Bench Verified/Pro/
+        # Multilingual, DeepSWE and SWE Atlas at temperature=1.0,
+        # top_p=0.95 -- higher than the general recommendation, and these
+        # are the numbers the published coding scores were produced with.
         "${MODEL_ID}:thinking-coding":
           temperature: 1.0
           top_p: 0.95
-        # Non-thinking. The card gives no sampling for this mode (it is a
-        # reasoning model first), so these follow the Qwen3 guidance for the
-        # architecture Ornith is built on: qwen3_5.
+        # Non-thinking. The card gives no sampling for this mode (Ornith is
+        # a reasoning model first), so these follow the Qwen3.5 guidance for
+        # the architecture it is built on: qwen3_5_moe.
         "${MODEL_ID}:instruct":
           temperature: 0.7
           top_p: 0.8

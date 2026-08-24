@@ -47,10 +47,11 @@ echo "Config: health=$HEALTH_PATH models=${MODELS_PATH:-<skip>} heavy=${HEAVY_PA
 
 if [ "$SKIP_RUN" != "1" ]; then
   # The build step loads the image into the local Docker daemon when it can, so
-  # normally there is nothing to pull. eve is the exception: at ~21 GB a third
-  # local copy fills the runner ("No space left on device"), so it builds with
-  # load disabled and we fetch it here — after the caller has freed the
-  # buildkit cache and the shards, which is what makes room for it.
+  # there may be nothing to pull. Both ik_llama images are now ~29 GB of shards,
+  # where a third local copy fills the runner ("No space left on device"), so
+  # they build with load disabled and we fetch them here — after the caller has
+  # freed the buildkit cache and the shards, which is what makes room. go-4 is
+  # small enough to still load directly, hence the inspect-then-pull below.
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "Image already in the local daemon; skipping pull."
   else

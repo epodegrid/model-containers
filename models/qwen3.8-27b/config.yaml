@@ -20,7 +20,7 @@ models:
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/ornith-1.0-9b-Q8_0-00001-of-00002.gguf
+      --model /models/Qwen3.8-27B-Q8_0-00001-of-00006.gguf
       --alias wall-e
       --port 9999
       --parallel 1
@@ -31,26 +31,38 @@ models:
       -ctk q8_0 -ctv q8_0
       --reasoning on
       --reasoning-format deepseek
-      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
+      --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
     aliases:
       - "wall-e"
-      - "ornith-9b"
-      - "Ornith-1.0-9B"
-      - "ornith-ai/Ornith-1.0-9B"
+      - "qwen"
+      - "Qwen3.8-27B"
+      - "Qwen/Qwen3.8-27B"
     filters:
       setParamsByID:
-        # Agentic/coding work. The model card reports SWE-Bench Verified/Pro
-        # and SWE Atlas at temperature=1.0, top_p=0.95 -- higher than the
-        # general recommendation, and these are the numbers the published
-        # coding scores were actually produced with.
+        # Agentic/coding work. The card evaluates SWE-bench Pro, DeepSWE 1.1
+        # and QwenSWEBench at temp=1.0, top_p=0.95 -- which is ALSO the
+        # card's recommended thinking-mode sampler, so this preset only
+        # pins what the bare id already defaults to.
         "${MODEL_ID}:thinking-coding":
           temperature: 1.0
           top_p: 0.95
-        # Non-thinking. The card gives no sampling for this mode (it is a
-        # reasoning model first), so these follow the Qwen3 guidance for the
-        # architecture Ornith is built on: qwen3_5.
+        # Non-thinking. Unlike Ornith, the Qwen3.8 card gives an explicit
+        # instruct-mode sampler -- and it asks for presence_penalty=1.5,
+        # not 0. That is a real difference from thinking mode (which wants
+        # 0), so it has to be set here rather than inherited from the cmd.
         "${MODEL_ID}:instruct":
           temperature: 0.7
           top_p: 0.8
+          presence_penalty: 1.5
           chat_template_kwargs:
             enable_thinking: false
+        # Qwen3.8 adds reasoning_effort (xhigh default / medium / low) on
+        # top of the on/off switch. Exposed as presets so callers can trade
+        # reasoning depth for latency without touching the sampler -- on a
+        # bandwidth-bound CPU path, output length dominates latency.
+        "${MODEL_ID}:thinking-medium":
+          chat_template_kwargs:
+            reasoning_effort: medium
+        "${MODEL_ID}:thinking-low":
+          chat_template_kwargs:
+            reasoning_effort: low

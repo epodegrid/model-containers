@@ -33,18 +33,19 @@ jobs:
         include:
           - image_name: eve
             dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/ornith-1.0-35b/config.yaml
+            config_path: models/ornith-1.5-35b-a3b/config.yaml
             download_mode: single
-            # deepreinforce-ai/* is a 307 redirect to ornith-ai/*; use the
-            # canonical org directly.
-            hf_repo: ornith-ai/Ornith-1.0-35B-GGUF
-            # Q5_K_M (24.73 GB). Q8_0 is 36.90 GB, which overflows the runner
-            # during the build (~74 GB needed against ~69 GB free after
-            # sharding) and, being memory-bandwidth bound, would run at ~0.57x
-            # these tokens/sec. Q6_K fits but costs ~15% throughput over
-            # Q5_K_M for a smaller quality step than Q4->Q5 -- and with
-            # reasoning on, output length is what dominates latency.
-            hf_filename: ornith-1.0-35b-Q5_K_M.gguf
+            hf_repo: ornith-ai/Ornith-1.5-35B-A3B-GGUF
+            # Q6_K (29.21 GB) -- the largest quant that still builds. Q8_0 is
+            # 37.80 GB and needs ~76 GB against ~69 GB free after sharding,
+            # the same overflow that ruled out 1.0's Q8_0 at 36.90 GB.
+            #
+            # 1.0 could not afford Q6_K: as a DENSE 35B it read every weight
+            # per token, so the ~15% bandwidth cost over Q5_K_M came straight
+            # off tokens/sec. 1.5 is a 256-expert MoE activating 8 (~3B of
+            # ~35B params), so per-token bandwidth is a fraction of the file
+            # and the quant step is close to free. Spend it on quality.
+            hf_filename: Ornith-1.5-35B-Q6_K.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
@@ -53,31 +54,43 @@ jobs:
             smoke_heavy_body: '{"model":"eve","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
-            # ~21 GB of Ornith-35B shards. Exporting a third copy into the
+            # ~29 GB of Ornith-1.5 shards. Exporting a third copy into the
             # Docker daemon (build context + buildkit layers + daemon) fills
             # even a 145 GB runner: "No space left on device". Pull it back
             # after the build instead, once the cache and shards are freed.
             build_load: 'false'
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/ornith-1.0-9b/config.yaml
+            config_path: models/qwen3.8-27b/config.yaml
             download_mode: single
-            hf_repo: ornith-ai/Ornith-1.0-9B-GGUF
-            # Q8_0 (9.53 GB): effectively lossless against bf16 at roughly half
-            # the memory traffic. CPU inference here is bandwidth-bound, so the
-            # 17.92 GB bf16 would run at about half the tokens/sec for no
-            # perceptible quality gain -- and Zen 3 has no AVX512-BF16, so it
-            # would also pay a software bf16->fp32 conversion per row.
-            hf_filename: ornith-1.0-9b-Q8_0.gguf
+            hf_repo: unsloth/Qwen3.8-27B-GGUF
+            # Q8_0 (29.05 GB): the largest usable quant in the repo. The only
+            # non-BF16 file above it is UD-Q8_K_XL (31.46 GB), and Unsloth's
+            # UD-*_XL dynamic quants are excluded here as unsupported by
+            # ik_llama.cpp -- so Q8_0 is the ceiling on quality regardless of
+            # what disk allows. It is also the safest pick: no imatrix, no
+            # dynamic per-tensor promotion, just straight 8-bit.
+            #
+            # wall-e is no longer the "small" image. It was a 9B at 9.53 GB;
+            # the image is dominated by the three ik_llama binaries and the
+            # base layer either way, so the slot now carries a second fully
+            # competent model rather than a cheap one.
+            hf_filename: Qwen3.8-27B-Q8_0.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
             smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
-            smoke_heavy_timeout: 120
+            # 9.53 GB loaded in well under 120s; 29.05 GB does not. Matched to
+            # eve, which loads a comparable number of bytes off the same disk.
+            smoke_heavy_timeout: 180
             smoke_ctx: '4096'
-            build_load: 'true'
+            # Was 'true' when this was a 9.53 GB model (3 copies = ~29 GB, fine
+            # against ~69 GB free). At 29.05 GB a third copy needs ~87 GB and
+            # the runner dies mid-build, exactly as eve's did. Pull the image
+            # back for the smoke test instead.
+            build_load: 'false'
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in
             download_mode: snapshot
