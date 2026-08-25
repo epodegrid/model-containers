@@ -30,7 +30,7 @@ Each component retains its own license:
 - llama.cpp       (https://github.com/ggerganov/llama.cpp)     — MIT
 - Ornith-1.5-35B-A3B (https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) — MIT
 - Ornith-1.5-35B-A3B-GGUF (https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) — MIT
-- Qwen3.8-27B     (https://huggingface.co/Qwen/Qwen3.8-27B)     — Apache-2.0
-- Qwen3.8-27B-GGUF (https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) — Apache-2.0
+- KAT-Coder-V2.5-Dev (https://huggingface.co/Kwaipilot/KAT-Coder-V2.5-Dev) — see upstream repo for licence terms
+- KAT-Coder-V2.5-Dev-MTP-APEX-GGUF (https://huggingface.co/Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF) — see upstream repo for licence terms
 - Nomic Embed Text v1.5    (https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) — Apache-2.0
 - Nomic Embed Vision v1.5  (https://huggingface.co/nomic-ai/nomic-embed-vision-v1.5) — Apache-2.0

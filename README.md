@@ -10,7 +10,7 @@ driver DaemonSets anyway).
 | Image | Engine | Model(s) | Hardware |
 |---|---|---|---|
 | `ghcr.io/epodegrid/eve:latest`    | ik_llama.cpp (multi-ISA dispatch) | `ornith-ai/Ornith-1.5-35B-A3B` (Q5_K_M) | any amd64 with AVX2 (Zen 3+) |
-| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `Qwen/Qwen3.8-27B` (UD-Q6_K_L)        | any amd64 with AVX2 (Zen 3+) |
+| `ghcr.io/epodegrid/wall-e:latest` | ik_llama.cpp (multi-ISA dispatch) | `Kwaipilot/KAT-Coder-V2.5-Dev` (MTP-APEX) | any amd64 with AVX2 (Zen 3+) |
 | `ghcr.io/epodegrid/go-4:latest`   | Python (FastAPI + transformers)   | `nomic-embed-text-v1.5` + `nomic-embed-vision-v1.5` | any amd64 |
 
 Both ik_llama images ship **three compiled llama-server binaries** inside
@@ -58,7 +58,7 @@ docker run --rm -p 9292:8080 ghcr.io/epodegrid/eve:latest
 # Watch the wrapper dispatch: `kubectl logs` will show
 # `[llama-server-wrapper] CPU detected (zenN), exec'ing /app/llama-server.zenN`
 
-# wall-e — Qwen3.8 27B
+# wall-e — KAT-Coder V2.5-Dev (MoE)
 docker pull ghcr.io/epodegrid/wall-e:latest
 docker run --rm -p 9293:8080 ghcr.io/epodegrid/wall-e:latest
 
@@ -103,16 +103,16 @@ the dense Ornith 1.0 pair they replace.
 | | full-attn layers | weights | KV @262144 (q8_0) | total |
 |---|---|---|---|---|
 | `eve` (Ornith-1.5-35B-A3B Q5_K_M) | 10 of 40 | 25.4 GB | 2.9 GB | **28.3 GB** |
-| `wall-e` (Qwen3.8-27B UD-Q6_K_L) | 16 of 64 | 24.2 GB | 9.1 GB | **33.4 GB** |
+| `wall-e` (KAT-Coder-V2.5-Dev MTP-APEX) | 10 of 40 | 20.7 GB | 2.9 GB | **23.6 GB** |
 
-wall-e still holds the larger cache — 16 full-attention layers at 4 KV heads
-against eve's 10 at 2 — so at equal context it costs about 3.2× per token. With
-an f16 cache these would be 34.6 GB and 46.2 GB.
+Both images now run the same qwen35moe skeleton (10 full-attention layers at
+2 KV heads), so their cache figures match; wall-e's is smaller only because its
+file is. With an f16 cache these would be 5.4 GB each.
 
 The headline change from Ornith 1.0 is that **weights now dominate, not cache**.
 The old pair spent 17.2 GB (wall-e) and 10.7 GB (eve) on KV; the hybrid layers
 cut that to 9.1 and 2.9 while the weights roughly tripled on wall-e. Net per
-replica: eve drops 35.5 → 28.3 GB, wall-e rises 26.7 → 33.4 GB.
+replica: eve drops 35.5 → 28.3 GB, wall-e drops 26.7 → 23.6 GB.
 
 Because the cache is now a small fraction of the total, **dropping `--ctx-size`
 buys far less than it used to** — cutting eve to 64K reclaims ~2.1 GB against a
@@ -148,17 +148,34 @@ way to get a non-reasoning reply.
   - `eve:instruct`        — non-thinking mode (enable_thinking=false)
 
 **wall-e** (llama-swap routing):
-- `wall-e`, `qwen`, `Qwen3.8-27B`, `Qwen/Qwen3.8-27B`
-  - `wall-e:thinking-coding`  — agentic/coding sampler (temp 1.0, top_p 0.95)
-  - `wall-e:instruct`         — non-thinking mode (enable_thinking=false,
-    plus the card's instruct sampler: temp 0.7, top_p 0.8, **presence_penalty 1.5**)
-  - `wall-e:thinking-medium`  — `reasoning_effort=medium`
-  - `wall-e:thinking-low`     — `reasoning_effort=low`
+- `wall-e`, `kat`, `kat-coder`, `KAT-Coder-V2.5-Dev`, `Kwaipilot/KAT-Coder-V2.5-Dev`
+  - `wall-e:thinking-coding` — agentic/coding sampler (temp 1.0, top_p 0.95)
+  - `wall-e:instruct`        — non-thinking mode (enable_thinking=false)
 
-Only Qwen3.8 has `reasoning_effort`, so the two depth presets exist on wall-e
-alone. Note the ids are unchanged (`eve`, `wall-e`) — callers pinned to the
-image name keep working across this swap; only `ornith-9b` / `Ornith-1.0-*`
-went away with the weights they named.
+The ids are unchanged (`eve`, `wall-e`) — callers pinned to the image name keep
+working across this swap. The Qwen3.8-era aliases and the `reasoning_effort`
+presets (`:thinking-medium` / `:thinking-low`) went away with those weights;
+KAT-Coder does not expose `reasoning_effort`.
+
+### Speculative decoding (MTP)
+
+Both images pass `--spec-type mtp`. Both GGUFs bundle an MTP layer
+(`block_count 41` = 40 layers + 1, `nextn_predict_layers 1`), so this is
+**self-speculative** — no separate draft model, no extra weights.
+
+Each forward pass emits a token and cheaply drafts the next; the following
+pass verifies the draft while generating, so an accepted draft yields two
+tokens for roughly one pass. That is worth disproportionately more on CPU than
+GPU: decoding here is memory-bandwidth bound, so a 2-token batch reads the
+weights **once** — the same traffic as a single token — and the extra
+arithmetic is free. It is also lossless: drafts are checked against the full
+model and rejected ones discarded, so output is identical to running without
+it. Typical gain is 1.4-2.2×, highest on predictable text — which includes the
+long `<think>` traces these reasoning models spend most of their output on.
+
+Note ik_llama had been *loading and discarding* these layers all along
+(`unused tensor blk.40.nextn.* -- ignoring` in the container log), because
+model params default to `mtp=false`.
 
 **go-4** (single FastAPI app, no swap):
 - `nomic-embed-vision-v1.5` — accepts mixed text + image inputs in `/v1/embeddings`
@@ -222,21 +239,33 @@ single `-march=znver5`.
   is firing on Zen 5 silicon. This matters more after the model swap, not
   less: both images changed architecture family *and* roughly tripled
   (wall-e) or held (eve) their weight footprint.
-- **MTP weights now exist but are NOT wired up.** This was previously blocked
-  on nothing being published. Both new models ship MTP: `Ornith-1.5-35B-A3B`
-  sets `mtp_num_hidden_layers: 1`, and the Unsloth Qwen3.8 repo ships a
-  separate `MTP/mtp-Qwen3.8-27B-Q4_0.gguf` (1.37 GB). Neither is downloaded or
-  passed to llama-server today, so the 1.4-2.2x lever is still unclaimed —
-  it now needs a draft-model wiring decision, not an upstream release.
-- **eve is now an MoE; the throughput estimates above are stale.** The
-  ~20-40 tok/s figure was measured against a *dense* 35B. Ornith 1.5 activates
-  8 of 256 experts (~3B of ~35B params), so per-token memory traffic is a
-  fraction of the 29.2 GB file. That should be a large speedup on a
-  bandwidth-bound CPU path, but it is unmeasured — see the benchmark item above.
-- **Both new models are vision-capable; both are served text-only.** Each repo
-  publishes an `mmproj` file (~0.9 GB) that we do not download or mount, so
-  `/v1/chat/completions` accepts text only. Adding it is a deliberate scope
-  decision, not an oversight.
+- **MTP is now wired up — but unmeasured on real silicon.** Both images pass
+  `--spec-type mtp` against GGUFs that bundle the layer. The 1.4-2.2x band is
+  typical for speculative decoding, not something we have measured here, and
+  the real figure depends on draft acceptance rate. Worth knowing: these are
+  hybrid/recurrent models, and ik_llama's
+  `common_speculative_needs_checkpoint()` is true for recurrent models — the
+  linear-attention state has to roll back on a rejected draft. We run the
+  default checkpoint mode; `--spec-ckpt-mode` is the first knob to try if MTP
+  misbehaves.
+- **Measured on E48as_v5: eve 20-30 tok/s.** That is ~43-65 GB/s of effective
+  memory bandwidth against eve's ~2.2 GB of per-token weight traffic (MoE,
+  ~3B active of 35B). The number to keep in mind when sizing anything here is
+  bytes-per-token, not file size: CPU decoding is bandwidth-bound, so
+  `tok/s ~= bandwidth / bytes-per-token`.
+
+  The previous dense Qwen3.8-27B in wall-e measured **1.4 tok/s** on identical
+  hardware and settings, because dense re-reads its whole ~24 GB file every
+  token. That is an ~11x structural handicap; thread count, NUMA and mlock
+  are worth a few percent each and cannot touch it. Both slots are MoE now.
+- **Both models are vision-capable; both are served text-only.** An `mmproj`
+  file (~0.9 GB) exists for each and is not downloaded or mounted, so
+  `/v1/chat/completions` accepts text only. A deliberate scope decision.
+- **Both slots now run the same architecture.** eve and wall-e are both
+  `qwen35moe` 35B-A3B tunes (Ornith's reasoning/coding model and Kwaipilot's
+  agentic-coding model). That is a deliberate trade: it is what buys wall-e
+  eve-class throughput, at the cost of the two slots no longer being
+  meaningfully diverse.
 - **Zen 3 lacks VNNI.** So `HAVE_FANCY_SIMD` is **NOT** defined on the
   `zen3` build — the AVX-512 base path, not the IQK VNNI kernels. Zen 4
   uses 256-bit double-pumped AVX-512 (~30-50% faster than AVX2); Zen 5

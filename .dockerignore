@@ -31,7 +31,7 @@ go-4-snapshot-vision/**
 # a near-miss here silently drops every shard from the build context instead of
 # erroring, producing an image that only fails at model load.
 !Ornith-1.5-35B-Q5_K_M-*.gguf
-!Qwen3.8-27B-UD-Q6_K_L-*.gguf
+!KAT-Coder-V2.5-Dev-MTP-APEX-i-quality-v2-*.gguf
 
 # Re-include go-4 snapshots
 !go-4-snapshot-text

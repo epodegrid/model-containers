@@ -70,40 +70,38 @@ jobs:
             build_load: 'false'
           - image_name: wall-e
             dockerfile_template: Dockerfile.ik-llama.in
-            config_path: models/qwen3.8-27b/config.yaml
+            config_path: models/kat-coder-v2.5-dev/config.yaml
             download_mode: single
-            hf_repo: unsloth/Qwen3.8-27B-GGUF
-            # UD-Q6_K_L (24.19 GB). Q8_0 (29.05 GB) built once and pushed,
-            # but only just: it finished with 54 MB free on a 145 GB disk,
-            # 100% full. See eve's note above for the measured budget -- peak
-            # is ~3.8x the GGUF against ~110 GB free, so 29 GB sits ON the
-            # ceiling. eve's Q6_K, 160 MB larger, wedged the runner outright.
-            # A build that wins by 54 MB is luck, not headroom: any growth in
-            # the base image, the runner image or ik_llama tips it over.
+            hf_repo: Myric/KAT-Coder-V2.5-Dev-MTP-APEX-GGUF
+            # Replaces the DENSE Qwen3.8-27B, which measured 1.4 tok/s on the
+            # production E48as_v5 against eve's 20-30. That gap is structural,
+            # not tuning: dense re-reads all ~24 GB of weights per token where
+            # eve (MoE, 3B active of 35B) reads ~2.2 GB. CPU decoding is
+            # memory-bandwidth bound, so it is ~11x of handicap and no thread,
+            # NUMA or mlock setting touches it.
             #
-            # UD-Q6_K_L keeps Q6-class quality with ~18 GB of real margin.
-            # Not an _XL dynamic quant, so it stays inside what ik_llama can
-            # load. Also drops the replica from 38.3 to 33.4 GB.
+            # KAT-Coder is the same qwen35moe skeleton as eve, confirmed from
+            # the GGUF header: 753 tensors, block_count 41, 256 experts /
+            # 8 used, embedding_length 2048. At 20.67 GB it reads ~1.8 GB per
+            # token -- LESS than eve -- and bundles the MTP layer
+            # (nextn_predict_layers=1) that --spec-type mtp turns on.
             #
-            # wall-e is no longer the "small" image. It was a 9B at 9.53 GB;
-            # the image is dominated by the three ik_llama binaries and the
-            # base layer either way, so the slot now carries a second fully
-            # competent model rather than a cheap one.
-            hf_filename: Qwen3.8-27B-UD-Q6_K_L.gguf
+            # Side effect: the smoke test should start passing again. It only
+            # ever failed here because a dense 27B cannot generate a token on
+            # a 15.6 GiB runner; eve passes at a comparable file size because
+            # MoE touches a fraction of the weights per token.
+            hf_filename: KAT-Coder-V2.5-Dev-MTP-APEX-i-quality-v2.gguf
             shard: 'true'
             image_tag: latest
             smoke_health_path: /health
             smoke_models_path: /v1/models
             smoke_heavy_path: /v1/chat/completions
             smoke_heavy_body: '{"model":"wall-e","messages":[{"role":"user","content":"hi"}],"max_tokens":2}'
-            # 9.53 GB loaded in well under 120s; 29.05 GB does not. Matched to
-            # eve, which loads a comparable number of bytes off the same disk.
             smoke_heavy_timeout: 180
             smoke_ctx: '4096'
-            # Was 'true' when this was a 9.53 GB model (3 copies = ~29 GB, fine
-            # against ~69 GB free). At 29.05 GB a third copy needs ~87 GB and
-            # the runner dies mid-build, exactly as eve's did. Pull the image
-            # back for the smoke test instead.
+            # 20.67 GB x ~3.8 peak = ~79 GB against ~110 GB free. A third
+            # copy in the daemon would be ~110 GB with no margin, so keep the
+            # build-then-pull path both ik_llama images now use.
             build_load: 'false'
           - image_name: go-4
             dockerfile_template: go-4/Dockerfile.go-4.in

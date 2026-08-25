@@ -16,6 +16,21 @@ models:
   # The model id is the IMAGE name, so callers address the container they
   # deployed rather than whatever weights happen to be inside it. "ornith"
   # stays as an alias, so anything already calling it keeps working.
+  # MTP (multi-token prediction) self-speculative decoding is ON.
+  #
+  # The weights already carried it: this GGUF reports block_count=41 (40
+  # layers + 1 MTP layer) and nextn_predict_layers=1. ik_llama was loading
+  # it and throwing it away -- the "unused tensor blk.40.nextn.* -- ignoring"
+  # line in the container log -- because model params default mtp=false.
+  # --spec-type mtp flips it on; no new weights, no separate draft model.
+  #
+  # The win is disproportionate on CPU. Decoding is memory-bandwidth bound,
+  # so verifying a 2-token batch reads the weights ONCE, the same as
+  # generating 1 token -- the extra arithmetic is free. Speculative decoding
+  # is also lossless: drafts are verified against the full model and
+  # rejected ones discarded, so output is unchanged. Expect 1.4-2.2x
+  # depending on acceptance rate, which is highest on the long <think>
+  # traces these reasoning models spend most of their output on.
   "eve":
     proxy: "http://127.0.0.1:9999"
     cmd: >
@@ -31,6 +46,7 @@ models:
       -ctk q8_0 -ctv q8_0
       --reasoning on
       --reasoning-format deepseek
+      --spec-type mtp
       --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
     aliases:
       - "eve"

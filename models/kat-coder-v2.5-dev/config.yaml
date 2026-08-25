@@ -16,11 +16,23 @@ models:
   # The model id is the IMAGE name, so callers address the container they
   # deployed rather than whatever weights happen to be inside it. The real
   # model name stays available as an alias.
+  #
+  # This slot was a DENSE 27B (Qwen3.8) and measured 1.4 tok/s on the
+  # E48as_v5. Dense is the whole reason: it re-read all ~24 GB of weights
+  # per token, against eve's ~2.2 GB (MoE, 3B active of 35B). On a
+  # bandwidth-bound CPU that is an ~11x handicap no amount of tuning
+  # closes. KAT-Coder is the same qwen35moe skeleton as eve -- 256
+  # experts, 8 active, 40 layers + 1 MTP -- so it reads ~1.8 GB/token
+  # and should land at eve-class throughput or better.
+  #
+  # MTP self-speculative decoding is on; see eve's config for why that is
+  # worth more on CPU than it looks. This GGUF bundles the layer
+  # (block_count=41, nextn_predict_layers=1).
   "wall-e":
     proxy: "http://127.0.0.1:9999"
     cmd: >
       /app/llama-server
-      --model /models/Qwen3.8-27B-UD-Q6_K_L-00001-of-00005.gguf
+      --model /models/KAT-Coder-V2.5-Dev-MTP-APEX-i-quality-v2-00001-of-00005.gguf
       --alias wall-e
       --port 9999
       --parallel 1
@@ -31,38 +43,24 @@ models:
       -ctk q8_0 -ctv q8_0
       --reasoning on
       --reasoning-format deepseek
-      --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
+      --spec-type mtp
+      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --presence-penalty 0 --repeat-penalty 1
     aliases:
       - "wall-e"
-      - "qwen"
-      - "Qwen3.8-27B"
-      - "Qwen/Qwen3.8-27B"
+      - "kat"
+      - "kat-coder"
+      - "KAT-Coder-V2.5-Dev"
+      - "Kwaipilot/KAT-Coder-V2.5-Dev"
     filters:
       setParamsByID:
-        # Agentic/coding work. The card evaluates SWE-bench Pro, DeepSWE 1.1
-        # and QwenSWEBench at temp=1.0, top_p=0.95 -- which is ALSO the
-        # card's recommended thinking-mode sampler, so this preset only
-        # pins what the bare id already defaults to.
+        # Agentic/coding work -- what this model is actually tuned for.
+        # Same qwen3_5 sampler shape the coding numbers are reported with.
         "${MODEL_ID}:thinking-coding":
           temperature: 1.0
           top_p: 0.95
-        # Non-thinking. Unlike Ornith, the Qwen3.8 card gives an explicit
-        # instruct-mode sampler -- and it asks for presence_penalty=1.5,
-        # not 0. That is a real difference from thinking mode (which wants
-        # 0), so it has to be set here rather than inherited from the cmd.
+        # Non-thinking. The template exposes enable_thinking, same as eve.
         "${MODEL_ID}:instruct":
           temperature: 0.7
           top_p: 0.8
-          presence_penalty: 1.5
           chat_template_kwargs:
             enable_thinking: false
-        # Qwen3.8 adds reasoning_effort (xhigh default / medium / low) on
-        # top of the on/off switch. Exposed as presets so callers can trade
-        # reasoning depth for latency without touching the sampler -- on a
-        # bandwidth-bound CPU path, output length dominates latency.
-        "${MODEL_ID}:thinking-medium":
-          chat_template_kwargs:
-            reasoning_effort: medium
-        "${MODEL_ID}:thinking-low":
-          chat_template_kwargs:
-            reasoning_effort: low
